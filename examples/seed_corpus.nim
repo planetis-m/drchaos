@@ -1,4 +1,4 @@
-import drchaos
+import ".." / "src" / drchaos
 
 type
   CorpusMessage = object

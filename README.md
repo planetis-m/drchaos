@@ -1,18 +1,20 @@
 # drchaos
 
-`drchaos` is a Nimony plugin that turns a typed Nim proc into a LibFuzzer-compatible fuzz target using a compact structured corpus format.
+`drchaos` turns a typed Nim proc into a LibFuzzer target with structure-aware mutation and generated `LLVMFuzzer*` entrypoints.
 
-## What it provides
+It is aimed at `nimony` projects that want libprotobuf-mutator-style shape-aware fuzzing without writing fuzz glue by hand.
 
-- `fuzzTarget` plugin syntax for declaring a fuzz harness without Nim macros
-- a structure-aware mutator with `Add`, `Delete`, `Mutate`, `Copy`, and `Clone` style operations
-- wire-format encoding and decoding helpers for corpus materialization
-- generated `LLVMFuzzerTestOneInput`, `LLVMFuzzerCustomMutator`, and `LLVMFuzzerCustomCrossOver` exports
+## Why try it?
 
-## Writing a fuzz target
+- Your input type is the schema. Objects, enums, `seq`, `ref`, and `Option[T]` become mutation-aware immediately.
+- The harness is generated for you. `fuzzTarget:` emits `LLVMFuzzerTestOneInput`, `LLVMFuzzerCustomMutator`, and `LLVMFuzzerCustomCrossOver`.
+- Mutations are structural, not just byte flips. The engine can add, delete, copy, clone, and recursively mutate nested fields.
+- Corpus data stays typed. The mutator works on structured nodes and only serializes at the input boundary.
+
+## Quick start
 
 ```nim
-import drchaos
+import ".." / "src" / drchaos
 
 proc crashNow() {.importc: "abort", header: "<stdlib.h>".}
 
@@ -36,49 +38,56 @@ fuzzTarget:
           crashNow()
 ```
 
-The input type is the schema. Nested objects, sequences, refs, and `Option[T]` values become mutable structured nodes in the corpus and mutator.
+Compile it from the repo root:
+
+```bash
+nimony c examples/simple.nim
+```
 
 ## Example set
 
-- `examples/simple.nim`: smallest useful target that still exercises enum, sequence, and option mutation.
-- `examples/http_request.nim`: realistic request-shaped input with nested objects and field-level header mutations.
-- `examples/state_machine.nim`: sequence-heavy state machine using `ref` children to exercise presence toggling and subtree copy/clone.
-- `examples/seed_corpus.nim`: minimal corpus materialization example using `encodeInput` and `tryDecodeInput`.
+- `examples/simple.nim` shows the smallest useful target with enum, sequence, and optional-field mutations.
+- `examples/http_request.nim` models a nested request object with headers, auth, and body fields.
+- `examples/state_machine.nim` focuses on ordered steps plus `ref` children, which is useful for workflow and parser-state targets.
+- `examples/seed_corpus.nim` shows how to turn typed values into corpus bytes and decode them back.
 
-## Wire Format
+## Writing targets
 
-`drchaos` stores corpus entries in its own compact wire format with a fixed header plus typed field tags. Public helpers:
+The target proc takes one typed input. That type becomes the shape the mutator explores.
 
-- `encodeInput(value)` serializes a typed value
-- `tryDecodeInput(data, value)` decodes without raising
-- `decodeInput[T](data)` decodes or returns `default(T)` on malformed input
+Good target shapes:
 
-The mutator always works on typed structured nodes, not raw byte slices, and only re-encodes to the wire format at the corpus boundary.
+- Request or command objects with enums, repeated fields, and optional sub-objects.
+- Stateful programs represented as `seq[Step]`.
+- Parsers that naturally map to nested objects instead of raw strings.
 
-## Building
+Less useful target shapes:
 
-Current Nimony builds are most reliable with an explicit source path:
+- A single `string` or `seq[byte]` when you already know the grammar and want structural mutation.
+- Flat objects with only one or two scalar fields.
+
+## Corpus helpers
+
+`drchaos` includes a small wire format for corpus materialization:
+
+- `encodeInput(value)` serializes a typed value.
+- `tryDecodeInput(data, value)` decodes into an existing variable and returns `false` on malformed input.
+- `decodeInput[T](data)` returns a decoded value or `default(T)` on failure.
+
+The corpus helper example is in `examples/seed_corpus.nim`.
+
+## What you get
+
+- `fuzzTarget`: plugin entrypoint for declaring a harness.
+- `Option[T]`: small option type used by the examples and runtime.
+- `encodeInput` / `tryDecodeInput` / `decodeInput`: corpus helpers.
+- `customMutator` / `customCrossOver` / `testOneInput`: runtime glue used by generated harnesses.
+
+## Run the examples
 
 ```bash
-nimony c --path:/home/ageralis/Projects/drchaos/src examples/simple.nim
+nimony c examples/simple.nim
+nimony c examples/http_request.nim
+nimony c examples/state_machine.nim
+nimony c examples/seed_corpus.nim
 ```
-
-Other examples compile the same way:
-
-```bash
-nimony c --path:/home/ageralis/Projects/drchaos/src examples/http_request.nim
-nimony c --path:/home/ageralis/Projects/drchaos/src examples/state_machine.nim
-nimony c --path:/home/ageralis/Projects/drchaos/src examples/seed_corpus.nim
-```
-
-For LibFuzzer integration, compile the generated C output with your usual sanitizer and `-fsanitize=fuzzer` toolchain flags.
-
-## Layout
-
-- `src/drchaos.nim`: public API surface
-- `src/drchaosplugin.nim`: Nimony plugin lowering
-- `src/drchaos/harness.nim`: harness state and LibFuzzer ABI helpers
-- `src/drchaos/mutator.nim`: structure-aware mutation engine
-- `src/drchaos/codec.nim`: wire-format encoding and decoding
-- `src/drchaos/schema.nim`: runtime schema inference
-- `examples/`: end-to-end fuzz targets and corpus examples

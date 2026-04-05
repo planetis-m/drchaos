@@ -1,4 +1,4 @@
-import drchaos
+import ".." / "src" / drchaos
 
 proc crashNow() {.importc: "abort", header: "<stdlib.h>".}
 
