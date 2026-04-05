@@ -13,46 +13,43 @@ proc buildSchema[T](value: Option[T]): SchemaNode {.untyped.}
 proc buildSchema[T](value: ref T): SchemaNode {.untyped.}
 proc buildSchema[T: object](value: T): SchemaNode
 
-proc newSchema(kind: SchemaKind): SchemaNode =
-  result = SchemaNode(kind: kind, mutationWeight: 1)
-
 proc buildSchema(value: bool): SchemaNode =
-  result = newSchema(skBool)
+  result = BoolSchema(mutationWeight: 1)
 
 proc buildSchema[T: SomeInteger](value: T): SchemaNode =
-  result = newSchema(skInt)
+  result = IntSchema(mutationWeight: 1)
 
 proc buildSchema[T: SomeFloat](value: T): SchemaNode =
-  result = newSchema(skFloat)
+  result = FloatSchema(mutationWeight: 1)
 
 proc buildSchema(value: string): SchemaNode =
-  result = newSchema(skString)
+  result = StringSchema(mutationWeight: 1)
 
 proc buildSchema[T: enum](value: T): SchemaNode =
-  result = newSchema(skEnum)
+  result = EnumSchema(mutationWeight: 1)
   var ordinal = low(T).ord
   while ordinal <= high(T).ord:
     result.enumNames.add $T(ordinal)
     inc ordinal
 
 proc buildSchema[T](value: seq[T]): SchemaNode {.untyped.} =
-  result = newSchema(skSeq)
+  result = SeqSchema(mutationWeight: 1)
   result.elem = buildSchema(default(T))
 
 proc buildSchema[I, T](value: array[I, T]): SchemaNode {.untyped.} =
-  result = newSchema(skSeq)
+  result = SeqSchema(mutationWeight: 1)
   result.elem = buildSchema(default(T))
 
 proc buildSchema[T](value: Option[T]): SchemaNode {.untyped.} =
-  result = newSchema(skOption)
+  result = OptionSchema(mutationWeight: 1)
   result.elem = buildSchema(default(T))
 
 proc buildSchema[T](value: ref T): SchemaNode {.untyped.} =
-  result = newSchema(skOption)
+  result = OptionSchema(mutationWeight: 1)
   result.elem = buildSchema(default(T))
 
 proc buildSchema[T: object](value: T): SchemaNode =
-  result = newSchema(skObject)
+  result = ObjectSchema(mutationWeight: 1, fields: @[])
   for fieldName, field in fieldPairs(value):
     result.fields.add FieldSchema(name: fieldName, node: buildSchema(field))
 

@@ -1,26 +1,6 @@
 ## Core runtime data structures for the drchaos structured fuzzing engine.
 
 type
-  NodeKind* = enum
-    nkBool
-    nkInt
-    nkFloat
-    nkString
-    nkEnum
-    nkSeq
-    nkObject
-    nkOption
-
-  SchemaKind* = enum
-    skBool
-    skInt
-    skFloat
-    skString
-    skEnum
-    skSeq
-    skObject
-    skOption
-
   MutationKind* = enum
     mkNone
     mkAdd
@@ -29,39 +9,44 @@ type
     mkCopy
     mkClone
 
+  FuzzNode* = object
+    case
+    of BoolNode:
+      boolVal*: bool
+    of IntNode:
+      intVal*: int64
+    of FloatNode:
+      floatVal*: float64
+    of StringNode:
+      stringVal*: string
+    of EnumNode:
+      enumVal*: int64
+    of SeqNode:
+      elems*: seq[FuzzNode]
+    of ObjectNode:
+      fields*: seq[FieldNode]
+    of OptionNode:
+      optVal*: seq[FuzzNode]
+
   FieldNode* = object
     name*: string
     value*: FuzzNode
 
+  SchemaNode* = ref object
+    mutationWeight*: Positive
+    case
+    of BoolSchema, IntSchema, FloatSchema, StringSchema:
+      discard
+    of EnumSchema:
+      enumNames*: seq[string]
+    of SeqSchema, OptionSchema:
+      elem*: SchemaNode
+    of ObjectSchema:
+      fields*: seq[FieldSchema]
+
   FieldSchema* = object
     name*: string
     node*: SchemaNode
-
-  FuzzNode* = object
-    case kind*: NodeKind
-    of nkBool:
-      boolVal*: bool
-    of nkInt:
-      intVal*: int64
-    of nkFloat:
-      floatVal*: float64
-    of nkString:
-      stringVal*: string
-    of nkEnum:
-      enumVal*: int64
-    of nkSeq:
-      elems*: seq[FuzzNode]
-    of nkObject:
-      fields*: seq[FieldNode]
-    of nkOption:
-      optVal*: seq[FuzzNode]
-
-  SchemaNode* = ref object
-    kind*: SchemaKind
-    mutationWeight*: Positive
-    fields*: seq[FieldSchema]
-    elem*: SchemaNode
-    enumNames*: seq[string]
 
   FuzzConfig* = object
     maxDepth*: Positive
@@ -84,3 +69,7 @@ proc defaultFuzzConfig*(): FuzzConfig =
     maxStringLen: 256,
     dictionary: @[]
   )
+
+proc default*(_: typedesc[FuzzNode]): FuzzNode =
+  ## Returns the default zero-like node used for seq allocation and resets.
+  result = BoolNode(boolVal: false)
