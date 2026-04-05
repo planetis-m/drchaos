@@ -73,6 +73,7 @@ type
   MutationCandidate* = object
     op*: MutationKind
     path*: seq[int]
+    weight*: int
 
 proc defaultFuzzConfig*(): FuzzConfig =
   ## Returns the default configuration used by generated harnesses.

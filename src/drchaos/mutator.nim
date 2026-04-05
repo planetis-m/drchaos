@@ -1,6 +1,6 @@
 ## LPM-style structure-aware mutator over decoded structured node trees.
 
-import codec, model, option, rng, schema
+import model, option, rng, schema
 
 proc defaultNode(schema: SchemaNode): FuzzNode
 proc clampInt(value, lowValue, highValue: int): int
@@ -28,6 +28,31 @@ proc valueFromNode[T: object](node: FuzzNode; value: var T)
 proc boxed(node: FuzzNode): ref FuzzNode =
   new(result)
   result[] = node
+
+proc deepCopyNode(node: FuzzNode): FuzzNode =
+  case node.kind
+  of nkBool:
+    result = FuzzNode(kind: nkBool, boolVal: node.boolVal)
+  of nkInt:
+    result = FuzzNode(kind: nkInt, intVal: node.intVal)
+  of nkEnum:
+    result = FuzzNode(kind: nkEnum, intVal: node.intVal)
+  of nkFloat:
+    result = FuzzNode(kind: nkFloat, floatVal: node.floatVal)
+  of nkString:
+    result = FuzzNode(kind: nkString, stringVal: node.stringVal)
+  of nkSeq:
+    result = FuzzNode(kind: nkSeq, elems: @[])
+    for item in node.elems:
+      result.elems.add deepCopyNode(item)
+  of nkObject:
+    result = FuzzNode(kind: nkObject, fields: @[])
+    for field in node.fields:
+      result.fields.add FieldNode(name: field.name, value: deepCopyNode(field.value))
+  of nkOption:
+    result = FuzzNode(kind: nkOption, optVal: none[ref FuzzNode]())
+    if node.optVal.hasValue:
+      result.optVal = some(boxed(deepCopyNode(node.optVal.value[])))
 
 proc appendIndex(path: seq[int]; index: int): seq[int] =
   result = newSeq[int](path.len + 1)
@@ -298,6 +323,30 @@ proc mutateLeaf(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
   of nkSeq, nkObject, nkOption:
     discard
 
+proc seedNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+    r: var Rand; depth = 0) =
+  case node.kind
+  of nkBool, nkInt, nkFloat, nkString, nkEnum:
+    mutateLeaf(node, schema, config, r)
+  of nkSeq:
+    if depth < config.maxDepth and node.elems.len < config.maxSeqLen:
+      let additions = 1 + r.randInt(min(1, config.maxSeqLen - 1))
+      for _ in 0..<additions:
+        var child = defaultNode(schema.elem)
+        if depth + 1 < config.maxDepth:
+          seedNode(child, schema.elem, config, r, depth + 1)
+        node.elems.add child
+  of nkObject:
+    for i in 0..<min(node.fields.len, schema.fields.len):
+      if r.randBool:
+        seedNode(node.fields[i].value, schema.fields[i].node, config, r, depth + 1)
+  of nkOption:
+    if not node.optVal.hasValue and depth < config.maxDepth:
+      var child = defaultNode(schema.elem)
+      if depth + 1 < config.maxDepth:
+        seedNode(child, schema.elem, config, r, depth + 1)
+      node.optVal = some(boxed(child))
+
 proc schemaAtPath(schema: SchemaNode; path: openArray[int]; depth = 0): SchemaNode =
   if depth >= path.len:
     return schema
@@ -312,25 +361,6 @@ proc schemaAtPath(schema: SchemaNode; path: openArray[int]; depth = 0): SchemaNo
       result = schema
   else:
     result = schema
-
-proc readPath(node: FuzzNode; path: openArray[int]; target: var FuzzNode;
-    depth = 0): bool =
-  if depth >= path.len:
-    target = node
-    return true
-  let index = path[depth]
-  case node.kind
-  of nkSeq:
-    if index < node.elems.len:
-      result = readPath(node.elems[index], path, target, depth + 1)
-  of nkObject:
-    if index < node.fields.len:
-      result = readPath(node.fields[index].value, path, target, depth + 1)
-  of nkOption:
-    if node.optVal.hasValue:
-      result = readPath(node.optVal.value[], path, target, depth + 1)
-  else:
-    discard
 
 proc mutateAtPath(node: var FuzzNode; schema: SchemaNode; path: openArray[int];
     config: FuzzConfig; r: var Rand; depth = 0) =
@@ -353,22 +383,33 @@ proc mutateAtPath(node: var FuzzNode; schema: SchemaNode; path: openArray[int];
     discard
 
 proc addAtPath(node: var FuzzNode; schema: SchemaNode; path: openArray[int];
-    depth = 0) =
+    config: FuzzConfig; r: var Rand; depth = 0) =
   if depth >= path.len:
-    if node.kind == nkOption:
-      node.optVal = some(boxed(defaultNode(schema.elem)))
+    case node.kind
+    of nkSeq:
+      if node.elems.len < config.maxSeqLen:
+        var child = defaultNode(schema.elem)
+        seedNode(child, schema.elem, config, r, depth + 1)
+        insertNodeAt(node.elems, r.randInt(0, node.elems.len), child)
+    of nkOption:
+      if not node.optVal.hasValue:
+        var child = defaultNode(schema.elem)
+        seedNode(child, schema.elem, config, r, depth + 1)
+        node.optVal = some(boxed(child))
+    else:
+      discard
     return
   let index = path[depth]
   case node.kind
   of nkSeq:
     if index < node.elems.len:
-      addAtPath(node.elems[index], schema.elem, path, depth + 1)
+      addAtPath(node.elems[index], schema.elem, path, config, r, depth + 1)
   of nkObject:
     if index < node.fields.len:
-      addAtPath(node.fields[index].value, schema.fields[index].node, path, depth + 1)
+      addAtPath(node.fields[index].value, schema.fields[index].node, path, config, r, depth + 1)
   of nkOption:
     if node.optVal.hasValue:
-      addAtPath(node.optVal.value[], schema.elem, path, depth + 1)
+      addAtPath(node.optVal.value[], schema.elem, path, config, r, depth + 1)
   else:
     discard
 
@@ -424,61 +465,159 @@ proc assignAtPath(node: var FuzzNode; path: openArray[int]; donor: FuzzNode;
   else:
     discard
 
+proc candidateWeight(schema: SchemaNode; op: MutationKind): int =
+  let baseWeight = int(schema.mutationWeight)
+  case op
+  of mkMutate:
+    result = baseWeight * 4
+  of mkAdd, mkClone:
+    result = baseWeight * 3
+  of mkCopy:
+    result = baseWeight * 2
+  of mkDelete:
+    result = baseWeight
+  of mkNone:
+    result = 0
+
+proc addCandidate(outp: var seq[MutationCandidate]; op: MutationKind; path: seq[int];
+    schema: SchemaNode) =
+  let weight = candidateWeight(schema, op)
+  if weight > 0:
+    outp.add MutationCandidate(op: op, path: path, weight: weight)
+
 proc collectCandidates(node: FuzzNode; schema: SchemaNode; path: seq[int];
     config: FuzzConfig; outp: var seq[MutationCandidate]) =
   case node.kind
   of nkBool, nkInt, nkFloat, nkString, nkEnum:
-    outp.add MutationCandidate(op: mkMutate, path: path)
+    addCandidate(outp, mkMutate, path, schema)
   of nkSeq:
-    outp.add MutationCandidate(op: mkClone, path: path)
+    addCandidate(outp, mkCopy, path, schema)
+    if node.elems.len < config.maxSeqLen:
+      addCandidate(outp, mkAdd, path, schema)
+      addCandidate(outp, mkClone, path, schema)
     if node.elems.len > 0:
-      outp.add MutationCandidate(op: mkDelete, path: path)
-      outp.add MutationCandidate(op: mkCopy, path: path)
+      addCandidate(outp, mkDelete, path, schema)
     for i in 0..<node.elems.len:
       let childPath = appendIndex(path, i)
       collectCandidates(node.elems[i], schema.elem, childPath, config, outp)
   of nkObject:
-    outp.add MutationCandidate(op: mkCopy, path: path)
+    addCandidate(outp, mkCopy, path, schema)
     for i in 0..<node.fields.len:
       let childPath = appendIndex(path, i)
       collectCandidates(node.fields[i].value, schema.fields[i].node, childPath, config, outp)
   of nkOption:
     if node.optVal.hasValue:
-      outp.add MutationCandidate(op: mkDelete, path: path)
-      outp.add MutationCandidate(op: mkCopy, path: path)
+      addCandidate(outp, mkDelete, path, schema)
+      addCandidate(outp, mkCopy, path, schema)
       let childPath = appendIndex(path, 0)
       collectCandidates(node.optVal.value[], schema.elem, childPath, config, outp)
     else:
-      outp.add MutationCandidate(op: mkAdd, path: path)
+      addCandidate(outp, mkAdd, path, schema)
+      addCandidate(outp, mkClone, path, schema)
 
-proc compatible(a, b: FuzzNode): bool =
-  result = false
-  if a.kind == b.kind:
-    result = true
-  elif a.kind == nkInt and b.kind == nkEnum:
-    result = true
-  elif a.kind == nkEnum and b.kind == nkInt:
-    result = true
-
-proc collectCompatibleSources(target: FuzzNode; source: FuzzNode;
-    outp: var seq[FuzzNode]) =
-  if compatible(target, source):
-    outp.add source
-  case source.kind
+proc collectCrossOverCandidates(node: FuzzNode; schema: SchemaNode; path: seq[int];
+    config: FuzzConfig; outp: var seq[MutationCandidate]) =
+  addCandidate(outp, mkCopy, path, schema)
+  case node.kind
   of nkSeq:
-    for child in source.elems:
-      collectCompatibleSources(target, child, outp)
+    if node.elems.len < config.maxSeqLen:
+      addCandidate(outp, mkClone, path, schema)
+    for i in 0..<node.elems.len:
+      let childPath = appendIndex(path, i)
+      collectCrossOverCandidates(node.elems[i], schema.elem, childPath, config, outp)
   of nkObject:
-    for field in source.fields:
-      collectCompatibleSources(target, field.value, outp)
+    for i in 0..<node.fields.len:
+      let childPath = appendIndex(path, i)
+      collectCrossOverCandidates(node.fields[i].value, schema.fields[i].node,
+          childPath, config, outp)
   of nkOption:
-    if source.optVal.hasValue:
-      collectCompatibleSources(target, source.optVal.value[], outp)
-  else:
+    if node.optVal.hasValue:
+      let childPath = appendIndex(path, 0)
+      collectCrossOverCandidates(node.optVal.value[], schema.elem, childPath, config, outp)
+    else:
+      addCandidate(outp, mkClone, path, schema)
+  of nkBool, nkInt, nkFloat, nkString, nkEnum:
     discard
 
-proc pickWeighted(candidates: seq[MutationCandidate]; r: var Rand): MutationCandidate =
-  result = candidates[r.randInt(candidates.high)]
+proc schemaCompatible(target, donor: SchemaNode): bool =
+  if target == nil or donor == nil:
+    return false
+  if target.kind != donor.kind:
+    return false
+  case target.kind
+  of skBool, skInt, skFloat, skString:
+    result = true
+  of skEnum:
+    result = target.enumNames == donor.enumNames
+  of skSeq, skOption:
+    result = schemaCompatible(target.elem, donor.elem)
+  of skObject:
+    if target.fields.len != donor.fields.len:
+      return false
+    result = true
+    for i in 0..<target.fields.len:
+      if target.fields[i].name != donor.fields[i].name:
+        return false
+      if not schemaCompatible(target.fields[i].node, donor.fields[i].node):
+        return false
+
+proc collectCompatibleSources(targetSchema: SchemaNode; sourceNode: FuzzNode;
+    sourceSchema: SchemaNode; outp: var seq[FuzzNode]) =
+  if schemaCompatible(targetSchema, sourceSchema):
+    outp.add deepCopyNode(sourceNode)
+  case sourceNode.kind
+  of nkSeq:
+    for child in sourceNode.elems:
+      collectCompatibleSources(targetSchema, child, sourceSchema.elem, outp)
+  of nkObject:
+    for i in 0..<min(sourceNode.fields.len, sourceSchema.fields.len):
+      collectCompatibleSources(targetSchema, sourceNode.fields[i].value,
+          sourceSchema.fields[i].node, outp)
+  of nkOption:
+    if sourceNode.optVal.hasValue:
+      collectCompatibleSources(targetSchema, sourceNode.optVal.value[],
+          sourceSchema.elem, outp)
+  of nkBool, nkInt, nkFloat, nkString, nkEnum:
+    discard
+
+proc pickWeightedIndex(candidates: seq[MutationCandidate]; r: var Rand): int =
+  var total = 0'u64
+  for candidate in candidates:
+    total = total + uint64(max(candidate.weight, 1))
+  if total == 0'u64:
+    return 0
+  let target = r.nextUint64() mod total
+  var cursor = 0'u64
+  for i in 0..<candidates.len:
+    cursor = cursor + uint64(max(candidates[i].weight, 1))
+    if target < cursor:
+      return i
+  result = candidates.high
+
+proc removeCandidateAt(candidates: var seq[MutationCandidate]; index: int) =
+  if candidates.len == 0:
+    return
+  let at = clampInt(index, 0, candidates.high)
+  var resized = newSeq[MutationCandidate](candidates.len - 1)
+  var dst = 0
+  for i in 0..<candidates.len:
+    if i != at:
+      resized[dst] = candidates[i]
+      inc dst
+  candidates = resized
+
+proc donorSchemaFor(schema: SchemaNode; choice: MutationCandidate): SchemaNode =
+  let targetSchema = schemaAtPath(schema, choice.path)
+  case choice.op
+  of mkClone:
+    if targetSchema.kind in {skSeq, skOption}:
+      result = targetSchema.elem
+    else:
+      result = targetSchema
+  of mkCopy:
+    result = targetSchema
+  else:
+    result = targetSchema
 
 proc shrinkToBudget(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig) =
   while approxSize(node) > config.maxBytes:
@@ -520,8 +659,22 @@ proc fixNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
     for i in 0..<node.elems.len:
       fixNode(node.elems[i], schema.elem, config, depth + 1)
   of nkObject:
-    for i in 0..<min(node.fields.len, schema.fields.len):
-      fixNode(node.fields[i].value, schema.fields[i].node, config, depth + 1)
+    var normalized: seq[FieldNode] = @[]
+    for i in 0..<schema.fields.len:
+      var fieldValue = defaultNode(schema.fields[i].node)
+      var found = false
+      if i < node.fields.len and node.fields[i].name == schema.fields[i].name:
+        fieldValue = node.fields[i].value
+        found = true
+      if not found:
+        for field in node.fields:
+          if field.name == schema.fields[i].name:
+            fieldValue = field.value
+            found = true
+            break
+      fixNode(fieldValue, schema.fields[i].node, config, depth + 1)
+      normalized.add FieldNode(name: schema.fields[i].name, value: fieldValue)
+    node.fields = normalized
   of nkOption:
     if node.optVal.hasValue:
       var child = node.optVal.value[]
@@ -531,33 +684,57 @@ proc fixNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
     discard
   shrinkToBudget(node, schema, config)
 
+proc tryApplyDonor(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+    choice: MutationCandidate; sources: openArray[FuzzNode]; r: var Rand): bool =
+  let targetSchema = donorSchemaFor(schema, choice)
+  var donors: seq[FuzzNode] = @[]
+  for source in sources:
+    collectCompatibleSources(targetSchema, source, schema, donors)
+  if donors.len == 0:
+    return false
+  let donor = donors[r.randInt(donors.high)]
+  assignAtPath(node, choice.path, donor, config, choice.op == mkClone, r)
+  result = true
+
 proc mutateNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
     sources: openArray[FuzzNode]; seed: uint32) =
-  ## Applies one LPM-style structural mutation to `node`.
+  ## Applies one structure-aware mutation to `node`.
   var r = initRand(seed)
   var candidates: seq[MutationCandidate] = @[]
   collectCandidates(node, schema, @[], config, candidates)
-  if candidates.len == 0:
-    return
-  let choice = pickWeighted(candidates, r)
-  case choice.op
-  of mkAdd:
-    addAtPath(node, schema, choice.path)
-  of mkMutate:
-    mutateAtPath(node, schema, choice.path, config, r)
-  of mkDelete:
-    deleteAtPath(node, choice.path, r)
-  of mkCopy, mkClone:
-    var target = node
-    var donors: seq[FuzzNode] = @[]
-    if readPath(node, choice.path, target):
-      for source in sources:
-        collectCompatibleSources(target, source, donors)
-    if donors.len > 0:
-      let donor = donors[r.randInt(donors.high)]
-      assignAtPath(node, choice.path, donor, config, choice.op == mkClone, r)
-  of mkNone:
-    discard
+  while candidates.len > 0:
+    let index = pickWeightedIndex(candidates, r)
+    let choice = candidates[index]
+    case choice.op
+    of mkAdd:
+      addAtPath(node, schema, choice.path, config, r)
+      break
+    of mkMutate:
+      mutateAtPath(node, schema, choice.path, config, r)
+      break
+    of mkDelete:
+      deleteAtPath(node, choice.path, r)
+      break
+    of mkCopy, mkClone:
+      if tryApplyDonor(node, schema, config, choice, sources, r):
+        break
+      removeCandidateAt(candidates, index)
+    of mkNone:
+      removeCandidateAt(candidates, index)
+  fixNode(node, schema, config)
+
+proc crossOverNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+    donors: openArray[FuzzNode]; seed: uint32) =
+  ## Applies one copy/clone-only crossover step to `node`.
+  var r = initRand(seed)
+  var candidates: seq[MutationCandidate] = @[]
+  collectCrossOverCandidates(node, schema, @[], config, candidates)
+  while candidates.len > 0:
+    let index = pickWeightedIndex(candidates, r)
+    let choice = candidates[index]
+    if tryApplyDonor(node, schema, config, choice, donors, r):
+      break
+    removeCandidateAt(candidates, index)
   fixNode(node, schema, config)
 
 proc mutateValue*[T](value: var T; config: FuzzConfig; sources: openArray[T];
@@ -569,4 +746,15 @@ proc mutateValue*[T](value: var T; config: FuzzConfig; sources: openArray[T];
   for item in sources:
     sourceNodes.add nodeFromValue(item)
   mutateNode(node, typeSchema, config, sourceNodes, seed)
+  valueFromNode(node, value)
+
+proc crossOverValue*[T](value: var T; config: FuzzConfig; donors: openArray[T];
+    seed: uint32) {.untyped.} =
+  ## Converts `value` to a node tree, performs copy/clone-only crossover, and decodes it back.
+  var node = nodeFromValue(value)
+  let typeSchema = schemaFor(T)
+  var donorNodes: seq[FuzzNode] = @[]
+  for item in donors:
+    donorNodes.add nodeFromValue(item)
+  crossOverNode(node, typeSchema, config, donorNodes, seed)
   valueFromNode(node, value)

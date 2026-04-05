@@ -104,7 +104,7 @@ proc customCrossOver*[T](harness: var FuzzHarness[T]; left, right: openArray[byt
     a = default(T)
   if not tryDecodeInput(right, b):
     b = default(T)
-  mutateValue(a, harness.config, [a, b], seed)
+  crossOverValue(a, harness.config, [b], seed)
   result = encodeInput(a)
   if result.len > maxOutLen:
     trimBytes(result, maxOutLen)
