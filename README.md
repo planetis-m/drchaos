@@ -49,6 +49,7 @@ nimony c examples/simple.nim
 - `examples/simple.nim` shows the smallest useful target with enum, sequence, and optional-field mutations.
 - `examples/http_request.nim` models a nested request object with headers, auth, and body fields.
 - `examples/state_machine.nim` focuses on ordered steps plus `ref` children, which is useful for workflow and parser-state targets.
+- `examples/graph_smoke.nim` is the harder example. It uses a graph-shaped input and a small corpus-evolution loop to exercise mutation, crossover, and target execution together.
 - `examples/seed_corpus.nim` shows how to turn typed values into corpus bytes and decode them back.
 
 ## Writing targets
@@ -89,5 +90,12 @@ The corpus helper example is in `examples/seed_corpus.nim`.
 nimony c examples/simple.nim
 nimony c examples/http_request.nim
 nimony c examples/state_machine.nim
+nimony c examples/graph_smoke.nim
 nimony c examples/seed_corpus.nim
+```
+
+To run the graph smoke test as an executable:
+
+```bash
+nimony c -r examples/graph_smoke.nim
 ```

@@ -91,7 +91,7 @@ proc customMutator*[T](harness: var FuzzHarness[T];
     if data.len > 0 and result.len > 0:
       for i in 0..<result.len:
         result[i] = data[i]
-  harness.cacheBytes = result
+  harness.cacheBytes = copyBytes(result)
   harness.cacheValue = current
   harness.hasCache = true
 

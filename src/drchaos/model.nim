@@ -1,7 +1,5 @@
 ## Core runtime data structures for the drchaos structured fuzzing engine.
 
-import option
-
 type
   NodeKind* = enum
     nkBool
@@ -43,18 +41,20 @@ type
     case kind*: NodeKind
     of nkBool:
       boolVal*: bool
-    of nkInt, nkEnum:
+    of nkInt:
       intVal*: int64
     of nkFloat:
       floatVal*: float64
     of nkString:
       stringVal*: string
+    of nkEnum:
+      enumVal*: int64
     of nkSeq:
       elems*: seq[FuzzNode]
     of nkObject:
       fields*: seq[FieldNode]
     of nkOption:
-      optVal*: Option[ref FuzzNode]
+      optVal*: seq[FuzzNode]
 
   SchemaNode* = ref object
     kind*: SchemaKind

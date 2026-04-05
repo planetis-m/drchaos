@@ -1,6 +1,6 @@
-## drchaos wire-format encoding helpers and typed node conversion.
+## drchaos wire-format encoding helpers.
 
-import model, option
+import option
 
 const
   wireHeader = ['d'.byte, 'c'.byte, 'h'.byte, 's'.byte, 1.byte, 0.byte]
@@ -44,28 +44,6 @@ proc readValue[T](data: openArray[byte]; pos: var int; value: var Option[T]): bo
 proc readValue[T](data: openArray[byte]; pos: var int; value: var ref T): bool {.
     untyped.}
 proc readValue[T: object](data: openArray[byte]; pos: var int; value: var T): bool
-
-proc toFuzzNode(value: bool): FuzzNode
-proc toFuzzNode[T: SomeInteger](value: T): FuzzNode
-proc toFuzzNode[T: SomeFloat](value: T): FuzzNode
-proc toFuzzNode(value: string): FuzzNode
-proc toFuzzNode[T: enum](value: T): FuzzNode
-proc toFuzzNode[T](value: seq[T]): FuzzNode {.untyped.}
-proc toFuzzNode[I, T](value: array[I, T]): FuzzNode {.untyped.}
-proc toFuzzNode[T](value: Option[T]): FuzzNode {.untyped.}
-proc toFuzzNode[T](value: ref T): FuzzNode {.untyped.}
-proc toFuzzNode[T: object](value: T): FuzzNode
-
-proc fromFuzzNode(node: FuzzNode; value: var bool)
-proc fromFuzzNode[T: SomeInteger](node: FuzzNode; value: var T)
-proc fromFuzzNode[T: SomeFloat](node: FuzzNode; value: var T)
-proc fromFuzzNode(node: FuzzNode; value: var string)
-proc fromFuzzNode[T: enum](node: FuzzNode; value: var T)
-proc fromFuzzNode[T](node: FuzzNode; value: var seq[T]) {.untyped.}
-proc fromFuzzNode[I, T](node: FuzzNode; value: var array[I, T]) {.untyped.}
-proc fromFuzzNode[T](node: FuzzNode; value: var Option[T]) {.untyped.}
-proc fromFuzzNode[T](node: FuzzNode; value: var ref T) {.untyped.}
-proc fromFuzzNode[T: object](node: FuzzNode; value: var T)
 
 proc writeByte(buffer: var seq[byte]; value: byte) =
   buffer.add value
@@ -128,10 +106,6 @@ proc expectTag(data: openArray[byte]; pos: var int; expected: WireTag): bool =
   if not tryReadByte(data, pos, tag):
     return false
   result = tag == expected.byte
-
-proc boxed(node: FuzzNode): ref FuzzNode =
-  new(result)
-  result[] = node
 
 proc writeObjectLike[T: object](buffer: var seq[byte]; value: T) =
   writeByte(buffer, wtStruct.byte)
@@ -334,118 +308,6 @@ proc readValue[T](data: openArray[byte]; pos: var int; value: var ref T): bool {
 
 proc readValue[T: object](data: openArray[byte]; pos: var int; value: var T): bool =
   result = readObjectLike(data, pos, value)
-
-proc toFuzzNode(value: bool): FuzzNode =
-  result = FuzzNode(kind: nkBool, boolVal: value)
-
-proc toFuzzNode[T: SomeInteger](value: T): FuzzNode =
-  result = FuzzNode(kind: nkInt, intVal: int64(value))
-
-proc toFuzzNode[T: SomeFloat](value: T): FuzzNode =
-  result = FuzzNode(kind: nkFloat, floatVal: float64(value))
-
-proc toFuzzNode(value: string): FuzzNode =
-  result = FuzzNode(kind: nkString, stringVal: value)
-
-proc toFuzzNode[T: enum](value: T): FuzzNode =
-  result = FuzzNode(kind: nkEnum, intVal: int64(value.ord))
-
-proc toFuzzNode[T](value: seq[T]): FuzzNode {.untyped.} =
-  result = FuzzNode(kind: nkSeq, elems: @[])
-  for item in value:
-    result.elems.add toFuzzNode(item)
-
-proc toFuzzNode[I, T](value: array[I, T]): FuzzNode {.untyped.} =
-  result = FuzzNode(kind: nkSeq, elems: @[])
-  for item in value:
-    result.elems.add toFuzzNode(item)
-
-proc toFuzzNode[T](value: Option[T]): FuzzNode {.untyped.} =
-  if value.hasValue:
-    result = FuzzNode(kind: nkOption, optVal: some(boxed(toFuzzNode(value.value))))
-  else:
-    result = FuzzNode(kind: nkOption, optVal: none[ref FuzzNode]())
-
-proc toFuzzNode[T](value: ref T): FuzzNode {.untyped.} =
-  if value != nil:
-    result = FuzzNode(kind: nkOption, optVal: some(boxed(toFuzzNode(value[]))))
-  else:
-    result = FuzzNode(kind: nkOption, optVal: none[ref FuzzNode]())
-
-proc toFuzzNode[T: object](value: T): FuzzNode =
-  result = FuzzNode(kind: nkObject, fields: @[])
-  for fieldName, field in fieldPairs(value):
-    result.fields.add FieldNode(name: fieldName, value: toFuzzNode(field))
-
-proc fromFuzzNode(node: FuzzNode; value: var bool) =
-  if node.kind == nkBool:
-    value = node.boolVal
-
-proc fromFuzzNode[T: SomeInteger](node: FuzzNode; value: var T) =
-  if node.kind == nkInt or node.kind == nkEnum:
-    value = T(node.intVal)
-
-proc fromFuzzNode[T: SomeFloat](node: FuzzNode; value: var T) =
-  if node.kind == nkFloat:
-    value = T(node.floatVal)
-
-proc fromFuzzNode(node: FuzzNode; value: var string) =
-  if node.kind == nkString:
-    value = node.stringVal
-
-proc fromFuzzNode[T: enum](node: FuzzNode; value: var T) =
-  if node.kind == nkEnum or node.kind == nkInt:
-    let ordinal = int(node.intVal)
-    if ordinal < low(T).ord:
-      value = low(T)
-    elif ordinal > high(T).ord:
-      value = high(T)
-    else:
-      value = T(ordinal)
-
-proc fromFuzzNode[T](node: FuzzNode; value: var seq[T]) {.untyped.} =
-  if node.kind != nkSeq:
-    return
-  value = newSeq[T](node.elems.len)
-  for i in 0..<node.elems.len:
-    fromFuzzNode(node.elems[i], value[i])
-
-proc fromFuzzNode[I, T](node: FuzzNode; value: var array[I, T]) {.untyped.} =
-  if node.kind != nkSeq:
-    return
-  let limit = min(node.elems.len, value.len)
-  for i in 0..<limit:
-    fromFuzzNode(node.elems[i], value[i])
-
-proc fromFuzzNode[T](node: FuzzNode; value: var Option[T]) {.untyped.} =
-  if node.kind != nkOption:
-    return
-  if node.optVal.hasValue:
-    var item: T
-    fromFuzzNode(node.optVal.value[], item)
-    value = some(item)
-  else:
-    value = none[T]()
-
-proc fromFuzzNode[T](node: FuzzNode; value: var ref T) {.untyped.} =
-  if node.kind != nkOption:
-    return
-  if node.optVal.hasValue:
-    new(value)
-    fromFuzzNode(node.optVal.value[], value[])
-  else:
-    value = nil
-
-proc fromFuzzNode[T: object](node: FuzzNode; value: var T) =
-  if node.kind != nkObject:
-    return
-  var zero: T
-  value = zero
-  for inputField in node.fields:
-    for fieldName, field in fieldPairs(value):
-      if fieldName == inputField.name:
-        fromFuzzNode(inputField.value, field)
-        break
 
 proc encodeInput*[T](value: T): seq[byte] {.untyped.} =
   ## Encodes `value` into the drchaos wire format used by this fuzzer.
