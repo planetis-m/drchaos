@@ -3,28 +3,35 @@ import nimonyplugins
 proc fail(msg: string; at: Node): Tree =
   errorTree("[drchaos] " & msg, at)
 
-proc skipStmtWrappers(n: var Node) =
-  while n.stmtKind == StmtsS:
-    inc n
-
 proc findTargetProc(root: Node): Node =
-  result = default(Node)
-  var n = root
-  skipStmtWrappers(n)
-  if n.stmtKind == ProcS:
-    result = n
+  if root.stmtKind == StmtsS:
+    var n = root
+    inc n
+    while n.kind != ParRi and n.kind != EofToken:
+      var stmt = n
+      if stmt.stmtKind == ProcS:
+        return stmt
+      if stmt.stmtKind == StmtsS:
+        let nested = findTargetProc(stmt)
+        if nested.stmtKind == ProcS:
+          return nested
+      skip n
+  elif root.stmtKind == ProcS:
+    return root
+  result = root
 
 proc extractProcName(procNode: Node): string =
   result = ""
   var n = procNode
   inc n
-  case n.kind
-  of Ident:
-    result = n.identText
-  of Symbol, SymbolDef:
-    result = n.symText
-  else:
-    discard
+  while n.kind notin {ParLe, ParRi, EofToken}:
+    case n.kind
+    of Ident:
+      return n.identText
+    of Symbol, SymbolDef:
+      return n.symText
+    else:
+      inc n
 
 proc emitParam(dest: var Tree; name, typeName: string) =
   dest.withTree ParamU, NoLineInfo:
@@ -72,10 +79,6 @@ proc emitAsgnCallWithCast(dest: var Tree; lhs, castName, callee: string;
 
 proc emitConfigVar(dest: var Tree) =
   emitVarInitCall(dest, "drChaosConfig", "FuzzConfig", "defaultFuzzConfig", [])
-
-proc emitHarnessVar(dest: var Tree; procName: string) =
-  emitVarInitCall(dest, "drChaosHarness", "", "initHarness",
-    [procName, "drChaosConfig"])
 
 proc emitTestOneInput(dest: var Tree) =
   dest.withTree ProcS, NoLineInfo:
@@ -166,6 +169,20 @@ proc emitCustomCrossOver(dest: var Tree) =
       emitAsgnCallWithCast(dest, "result", "csize_t", "writeBytesToPtr",
         ["out", "mutated"])
 
+proc emitOriginalBlock(dest: var Tree; root: Node) =
+  if root.stmtKind == StmtsS:
+    var n = root
+    inc n
+    while n.kind != ParRi and n.kind != EofToken:
+      var stmt = n
+      if stmt.stmtKind == StmtsS:
+        emitOriginalBlock(dest, stmt)
+        skip n
+      else:
+        dest.takeTree(n)
+  else:
+    dest.addSubtree(root)
+
 proc generate(root: Node): Tree =
   let procNode = findTargetProc(root)
   if procNode.kind == EofToken:
@@ -176,10 +193,10 @@ proc generate(root: Node): Tree =
 
   result = createTree()
   result.withTree StmtsS, root.info:
-    var copiedProc = procNode
-    result.takeTree(copiedProc)
+    emitOriginalBlock(result, root)
     emitConfigVar(result)
-    emitHarnessVar(result, procName)
+    emitVarInitCall(result, "drChaosHarness", "", "initHarness",
+      [procName, "drChaosSeed", "drChaosSchema", "drChaosConfig"])
     emitTestOneInput(result)
     emitCustomMutator(result)
     emitCustomCrossOver(result)

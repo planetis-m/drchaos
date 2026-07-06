@@ -1,49 +1,18 @@
-## drchaos wire-format encoding helpers.
+## drchaos wire-format encoding helpers for dynamic values.
 
-import option
+import model
 
 const
-  wireHeader = ['d'.byte, 'c'.byte, 'h'.byte, 's'.byte, 1.byte, 0.byte]
-
-type
-  WireTag = enum
-    wtBool
-    wtInt
-    wtFloat
-    wtString
-    wtArray
-    wtStruct
-    wtEndStruct
-    wtOption
-    wtEnum
-
-proc writeValue(buffer: var seq[byte]; value: bool)
-proc writeValue[T: SomeInteger](buffer: var seq[byte]; value: T)
-proc writeValue[T: SomeFloat](buffer: var seq[byte]; value: T)
-proc writeValue(buffer: var seq[byte]; value: string)
-proc writeValue[T: enum](buffer: var seq[byte]; value: T)
-proc writeValue[T](buffer: var seq[byte]; value: seq[T]) {.untyped.}
-proc writeValue[I, T](buffer: var seq[byte]; value: array[I, T]) {.untyped.}
-proc writeValue[T](buffer: var seq[byte]; value: Option[T]) {.untyped.}
-proc writeValue[T](buffer: var seq[byte]; value: ref T) {.untyped.}
-proc writeValue[T: object](buffer: var seq[byte]; value: T)
-
-proc readValue(data: openArray[byte]; pos: var int; value: var bool): bool
-proc readValue[T: SomeInteger](data: openArray[byte]; pos: var int;
-    value: var T): bool
-proc readValue[T: SomeFloat](data: openArray[byte]; pos: var int;
-    value: var T): bool
-proc readValue(data: openArray[byte]; pos: var int; value: var string): bool
-proc readValue[T: enum](data: openArray[byte]; pos: var int; value: var T): bool
-proc readValue[T](data: openArray[byte]; pos: var int; value: var seq[T]): bool {.
-    untyped.}
-proc readValue[I, T](data: openArray[byte]; pos: var int; value: var array[I, T]): bool {.
-    untyped.}
-proc readValue[T](data: openArray[byte]; pos: var int; value: var Option[T]): bool {.
-    untyped.}
-proc readValue[T](data: openArray[byte]; pos: var int; value: var ref T): bool {.
-    untyped.}
-proc readValue[T: object](data: openArray[byte]; pos: var int; value: var T): bool
+  wireHeader = ['d'.byte, 'c'.byte, 'h'.byte, 's'.byte, 2.byte, 0.byte]
+  tagBool = 0.byte
+  tagInt = 1.byte
+  tagFloat = 2.byte
+  tagString = 3.byte
+  tagArray = 4.byte
+  tagStruct = 5.byte
+  tagEndStruct = 6.byte
+  tagOption = 7.byte
+  tagEnum = 8.byte
 
 proc writeByte(buffer: var seq[byte]; value: byte) =
   buffer.add value
@@ -101,222 +70,135 @@ proc tryReadStringData(data: openArray[byte]; pos: var int; value: var string): 
   inc pos, length
   result = true
 
-proc expectTag(data: openArray[byte]; pos: var int; expected: WireTag): bool =
+proc expectTag(data: openArray[byte]; pos: var int; expected: byte): bool =
   var tag = 0.byte
   if not tryReadByte(data, pos, tag):
     return false
-  result = tag == expected.byte
+  result = tag == expected
 
-proc writeObjectLike[T: object](buffer: var seq[byte]; value: T) =
-  writeByte(buffer, wtStruct.byte)
-  for fieldName, field in fieldPairs(value):
-    writeStringData(buffer, fieldName)
-    writeValue(buffer, field)
-  writeByte(buffer, wtEndStruct.byte)
+proc writeValue(buffer: var seq[byte]; value: Value)
 
-proc readObjectLike[T: object](data: openArray[byte]; pos: var int;
-    value: var T): bool {.untyped.} =
-  if not expectTag(data, pos, wtStruct):
+proc writeValue(buffer: var seq[byte]; value: Value) =
+  case nodeKind(value)
+  of nkBool:
+    writeByte(buffer, tagBool)
+    writeByte(buffer, byte(ord(value.boolVal)))
+  of nkInt:
+    writeByte(buffer, tagInt)
+    writeInt64(buffer, value.intVal)
+  of nkFloat:
+    writeByte(buffer, tagFloat)
+    writeInt64(buffer, cast[int64](value.floatVal))
+  of nkString:
+    writeByte(buffer, tagString)
+    writeStringData(buffer, value.stringVal)
+  of nkEnum:
+    writeByte(buffer, tagEnum)
+    writeInt64(buffer, value.enumVal)
+  of nkSeq:
+    writeByte(buffer, tagArray)
+    writeInt32(buffer, int32(value.elems.len))
+    for item in value.elems:
+      writeValue(buffer, item[])
+  of nkObject:
+    writeByte(buffer, tagStruct)
+    for i in 0..<min(value.fieldNames.len, value.fieldValues.len):
+      writeByte(buffer, tagString)
+      writeStringData(buffer, value.fieldNames[i])
+      writeValue(buffer, value.fieldValues[i][])
+    writeByte(buffer, tagEndStruct)
+  of nkOption:
+    writeByte(buffer, tagOption)
+    if value.optVal != nil:
+      writeByte(buffer, 1)
+      writeValue(buffer, value.optVal[])
+    else:
+      writeByte(buffer, 0)
+
+proc readValue(data: openArray[byte]; pos: var int; value: var Value): bool =
+  var tag = 0.byte
+  if not tryReadByte(data, pos, tag):
     return false
-  value = default(T)
-  while true:
-    var tag = 0.byte
-    if not tryReadByte(data, pos, tag):
+  case tag
+  of tagBool:
+    var b = 0.byte
+    if not tryReadByte(data, pos, b):
       return false
-    if tag == wtEndStruct.byte:
-      return true
-    dec pos
-    var fieldName = ""
-    if not tryReadStringData(data, pos, fieldName):
+    value = boolValue(b != 0)
+  of tagInt:
+    var raw = 0'i64
+    if not tryReadInt64(data, pos, raw):
       return false
-    var matched = false
-    for existingName, field in fieldPairs(value):
-      if existingName == fieldName:
-        if not readValue(data, pos, field):
-          return false
-        matched = true
+    value = intValue(raw)
+  of tagFloat:
+    var raw = 0'i64
+    if not tryReadInt64(data, pos, raw):
+      return false
+    value = floatValue(cast[float64](raw))
+  of tagString:
+    var text = ""
+    if not tryReadStringData(data, pos, text):
+      return false
+    value = stringValue(text)
+  of tagEnum:
+    var ordinal = 0'i64
+    if not tryReadInt64(data, pos, ordinal):
+      return false
+    value = enumValue(ordinal)
+  of tagArray:
+    var length32 = 0'i32
+    if not tryReadInt32(data, pos, length32):
+      return false
+    let length = int(length32)
+    if length < 0:
+      return false
+    var items: seq[Value] = @[]
+    for _ in 0..<length:
+      var item = default(Value)
+      if not readValue(data, pos, item):
+        return false
+      items.add item
+    value = arrayValue(items)
+  of tagStruct:
+    value = objectValue()
+    while true:
+      var next = 0.byte
+      if not tryReadByte(data, pos, next):
+        return false
+      if next == tagEndStruct:
         break
-    if not matched:
+      if next != tagString:
+        return false
+      var name = ""
+      if not tryReadStringData(data, pos, name):
+        return false
+      var child = default(Value)
+      if not readValue(data, pos, child):
+        return false
+      addField(value, name, child)
+  of tagOption:
+    var present = 0.byte
+    if not tryReadByte(data, pos, present):
       return false
-
-proc writeValue(buffer: var seq[byte]; value: bool) =
-  writeByte(buffer, wtBool.byte)
-  writeByte(buffer, byte(ord(value)))
-
-proc writeValue[T: SomeInteger](buffer: var seq[byte]; value: T) =
-  writeByte(buffer, wtInt.byte)
-  writeInt64(buffer, int64(value))
-
-proc writeValue[T: SomeFloat](buffer: var seq[byte]; value: T) =
-  writeByte(buffer, wtFloat.byte)
-  writeInt64(buffer, cast[int64](float64(value)))
-
-proc writeValue(buffer: var seq[byte]; value: string) =
-  writeByte(buffer, wtString.byte)
-  writeStringData(buffer, value)
-
-proc writeValue[T: enum](buffer: var seq[byte]; value: T) =
-  writeByte(buffer, wtEnum.byte)
-  writeInt64(buffer, int64(value.ord))
-
-proc writeValue[T](buffer: var seq[byte]; value: seq[T]) {.untyped.} =
-  writeByte(buffer, wtArray.byte)
-  writeInt32(buffer, int32(value.len))
-  for item in value:
-    writeValue(buffer, item)
-
-proc writeValue[I, T](buffer: var seq[byte]; value: array[I, T]) {.untyped.} =
-  writeByte(buffer, wtArray.byte)
-  writeInt32(buffer, int32(value.len))
-  for item in value:
-    writeValue(buffer, item)
-
-proc writeValue[T](buffer: var seq[byte]; value: Option[T]) {.untyped.} =
-  writeByte(buffer, wtOption.byte)
-  if value.hasValue:
-    writeByte(buffer, 1)
-    writeValue(buffer, value.value)
+    if present == 0:
+      value = noneValue()
+    else:
+      var child = default(Value)
+      if not readValue(data, pos, child):
+        return false
+      value = someValue(child)
   else:
-    writeByte(buffer, 0)
-
-proc writeValue[T](buffer: var seq[byte]; value: ref T) {.untyped.} =
-  writeByte(buffer, wtOption.byte)
-  if value != nil:
-    writeByte(buffer, 1)
-    writeValue(buffer, value[])
-  else:
-    writeByte(buffer, 0)
-
-proc writeValue[T: object](buffer: var seq[byte]; value: T) =
-  writeObjectLike(buffer, value)
-
-proc readValue(data: openArray[byte]; pos: var int; value: var bool): bool =
-  if not expectTag(data, pos, wtBool):
     return false
-  var b = 0.byte
-  if not tryReadByte(data, pos, b):
-    return false
-  value = b != 0
   result = true
 
-proc readValue[T: SomeInteger](data: openArray[byte]; pos: var int;
-    value: var T): bool =
-  if not expectTag(data, pos, wtInt):
-    return false
-  var raw = 0'i64
-  if not tryReadInt64(data, pos, raw):
-    return false
-  value = T(raw)
-  result = true
-
-proc readValue[T: SomeFloat](data: openArray[byte]; pos: var int;
-    value: var T): bool =
-  if not expectTag(data, pos, wtFloat):
-    return false
-  var raw = 0'i64
-  if not tryReadInt64(data, pos, raw):
-    return false
-  value = T(cast[float64](raw))
-  result = true
-
-proc readValue(data: openArray[byte]; pos: var int; value: var string): bool =
-  if not expectTag(data, pos, wtString):
-    return false
-  result = tryReadStringData(data, pos, value)
-
-proc readValue[T: enum](data: openArray[byte]; pos: var int; value: var T): bool =
-  if not expectTag(data, pos, wtEnum):
-    return false
-  var ordinal64 = 0'i64
-  if not tryReadInt64(data, pos, ordinal64):
-    return false
-  let ordinal = int(ordinal64)
-  if ordinal < low(T).ord:
-    value = low(T)
-  elif ordinal > high(T).ord:
-    value = high(T)
-  else:
-    value = T(ordinal)
-  result = true
-
-proc readValue[T](data: openArray[byte]; pos: var int; value: var seq[T]): bool {.
-    untyped.} =
-  if not expectTag(data, pos, wtArray):
-    return false
-  var length32 = 0'i32
-  if not tryReadInt32(data, pos, length32):
-    return false
-  let length = int(length32)
-  if length < 0:
-    return false
-  value = newSeq[T](length)
-  for i in 0..<length:
-    if not readValue(data, pos, value[i]):
-      return false
-  result = true
-
-proc readValue[I, T](data: openArray[byte]; pos: var int; value: var array[I, T]): bool {.
-    untyped.} =
-  if not expectTag(data, pos, wtArray):
-    return false
-  var length32 = 0'i32
-  if not tryReadInt32(data, pos, length32):
-    return false
-  let length = int(length32)
-  if length < 0:
-    return false
-  var i = 0
-  while i < value.len and i < length:
-    if not readValue(data, pos, value[i]):
-      return false
-    inc i
-  while i < length:
-    var ignored: T
-    if not readValue(data, pos, ignored):
-      return false
-    inc i
-  result = true
-
-proc readValue[T](data: openArray[byte]; pos: var int; value: var Option[T]): bool {.
-    untyped.} =
-  if not expectTag(data, pos, wtOption):
-    return false
-  var present = 0.byte
-  if not tryReadByte(data, pos, present):
-    return false
-  if present == 0:
-    value = none[T]()
-    return true
-  var item = default(T)
-  if not readValue(data, pos, item):
-    return false
-  value = some(item)
-  result = true
-
-proc readValue[T](data: openArray[byte]; pos: var int; value: var ref T): bool {.
-    untyped.} =
-  if not expectTag(data, pos, wtOption):
-    return false
-  var present = 0.byte
-  if not tryReadByte(data, pos, present):
-    return false
-  if present == 0:
-    value = nil
-    return true
-  new(value)
-  result = readValue(data, pos, value[])
-
-proc readValue[T: object](data: openArray[byte]; pos: var int; value: var T): bool =
-  result = readObjectLike(data, pos, value)
-
-proc encodeInput*[T](value: T): seq[byte] {.untyped.} =
-  ## Encodes `value` into the drchaos wire format used by this fuzzer.
+proc encodeInput*(value: Value): seq[byte] =
+  ## Encodes a dynamic value into the drchaos wire format.
   result = @[]
   for item in wireHeader:
     result.add item
   writeValue(result, value)
 
-proc tryDecodeInput*[T](data: openArray[byte]; value: var T): bool {.untyped.} =
+proc tryDecodeInput*(data: openArray[byte]; value: var Value): bool =
   ## Decodes `data` into `value`, returning false for malformed input.
   if data.len < wireHeader.len:
     return false
@@ -328,7 +210,10 @@ proc tryDecodeInput*[T](data: openArray[byte]; value: var T): bool {.untyped.} =
     return false
   result = pos == data.len
 
-proc decodeInput*[T](data: openArray[byte]): T {.untyped.} =
-  ## Decodes `data` and returns `default(T)` when decoding fails.
-  result = default(T)
-  discard tryDecodeInput(data, result)
+proc decodeInput*(data: openArray[byte]): Value =
+  ## Decodes `data` and returns a default value on failure.
+  var decoded = default(Value)
+  if tryDecodeInput(data, decoded):
+    result = decoded
+  else:
+    result = default(Value)

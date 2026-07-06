@@ -1,58 +1,77 @@
-## Generic schema construction for supported Nim input types.
+## Dynamic schema builders for the drchaos value model.
 
-import model, option
+import model
 
-proc buildSchema(value: bool): SchemaNode
-proc buildSchema[T: SomeInteger](value: T): SchemaNode
-proc buildSchema[T: SomeFloat](value: T): SchemaNode
-proc buildSchema(value: string): SchemaNode
-proc buildSchema[T: enum](value: T): SchemaNode
-proc buildSchema[T](value: seq[T]): SchemaNode {.untyped.}
-proc buildSchema[I, T](value: array[I, T]): SchemaNode {.untyped.}
-proc buildSchema[T](value: Option[T]): SchemaNode {.untyped.}
-proc buildSchema[T](value: ref T): SchemaNode {.untyped.}
-proc buildSchema[T: object](value: T): SchemaNode
+proc newSchema(kind: SchemaKind): SchemaNode =
+  result = SchemaNode(kind: kind, mutationWeight: 1)
 
-proc buildSchema(value: bool): SchemaNode =
-  result = BoolSchema(mutationWeight: 1)
+proc boolSchema*(): SchemaNode =
+  ## Constructs a boolean schema node.
+  result = newSchema(skBool)
 
-proc buildSchema[T: SomeInteger](value: T): SchemaNode =
-  result = IntSchema(mutationWeight: 1)
+proc intSchema*(): SchemaNode =
+  ## Constructs an integer schema node.
+  result = newSchema(skInt)
 
-proc buildSchema[T: SomeFloat](value: T): SchemaNode =
-  result = FloatSchema(mutationWeight: 1)
+proc floatSchema*(): SchemaNode =
+  ## Constructs a floating-point schema node.
+  result = newSchema(skFloat)
 
-proc buildSchema(value: string): SchemaNode =
-  result = StringSchema(mutationWeight: 1)
+proc stringSchema*(): SchemaNode =
+  ## Constructs a string schema node.
+  result = newSchema(skString)
 
-proc buildSchema[T: enum](value: T): SchemaNode =
-  result = EnumSchema(mutationWeight: 1)
-  var ordinal = low(T).ord
-  while ordinal <= high(T).ord:
-    result.enumNames.add $T(ordinal)
-    inc ordinal
+proc enumSchema*(names: seq[string]): SchemaNode =
+  ## Constructs an enum schema node.
+  result = newSchema(skEnum)
+  result.enumNames = names
 
-proc buildSchema[T](value: seq[T]): SchemaNode {.untyped.} =
-  result = SeqSchema(mutationWeight: 1)
-  result.elem = buildSchema(default(T))
+proc seqSchema*(elem: SchemaNode): SchemaNode =
+  ## Constructs a repeated-field schema node.
+  result = newSchema(skSeq)
+  result.elem = elem
 
-proc buildSchema[I, T](value: array[I, T]): SchemaNode {.untyped.} =
-  result = SeqSchema(mutationWeight: 1)
-  result.elem = buildSchema(default(T))
+proc optionSchema*(elem: SchemaNode): SchemaNode =
+  ## Constructs an optional-field schema node.
+  result = newSchema(skOption)
+  result.elem = elem
 
-proc buildSchema[T](value: Option[T]): SchemaNode {.untyped.} =
-  result = OptionSchema(mutationWeight: 1)
-  result.elem = buildSchema(default(T))
+proc fieldSchema*(name: string; node: SchemaNode): FieldSchema =
+  ## Constructs an object field schema.
+  result = FieldSchema(name: name, node: node)
 
-proc buildSchema[T](value: ref T): SchemaNode {.untyped.} =
-  result = OptionSchema(mutationWeight: 1)
-  result.elem = buildSchema(default(T))
+proc objectSchema*(fields: seq[FieldSchema]): SchemaNode =
+  ## Constructs an object schema node.
+  result = newSchema(skObject)
+  result.fields = fields
 
-proc buildSchema[T: object](value: T): SchemaNode =
-  result = ObjectSchema(mutationWeight: 1, fields: @[])
-  for fieldName, field in fieldPairs(value):
-    result.fields.add FieldSchema(name: fieldName, node: buildSchema(field))
-
-proc schemaFor*[T](_: typedesc[T]): SchemaNode {.untyped.} =
-  ## Builds a runtime schema for `T`.
-  result = buildSchema(default(T))
+proc schemaFromValue*(value: Value): SchemaNode =
+  ## Infers a schema from a fully materialized value.
+  case nodeKind(value)
+  of nkBool:
+    result = boolSchema()
+  of nkInt:
+    result = intSchema()
+  of nkFloat:
+    result = floatSchema()
+  of nkString:
+    result = stringSchema()
+  of nkEnum:
+    result = enumSchema(newSeq[string](0))
+  of nkSeq:
+    result = newSchema(skSeq)
+    if value.elems.len > 0:
+      result.elem = schemaFromValue(value.elems[0][])
+    else:
+      result.elem = boolSchema()
+  of nkObject:
+    result = newSchema(skObject)
+    result.fields = @[]
+    for i in 0..<min(value.fieldNames.len, value.fieldValues.len):
+      result.fields.add fieldSchema(value.fieldNames[i], schemaFromValue(value.fieldValues[i][]))
+  of nkOption:
+    result = newSchema(skOption)
+    if value.optVal != nil:
+      result.elem = schemaFromValue(value.optVal[])
+    else:
+      result.elem = boolSchema()

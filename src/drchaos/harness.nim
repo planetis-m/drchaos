@@ -1,18 +1,19 @@
-## Generic harness and LibFuzzer ABI helpers.
+## Dynamic harness and LibFuzzer ABI helpers.
 
-import codec, model, mutator, schema
+import codec, model, mutator
 
 type
   BytePtr* = ptr UncheckedArray[byte]
 
-  FuzzTargetProc*[T] = proc (input: T) {.nimcall.}
+  FuzzTargetProc* = proc (input: Value) {.nimcall.}
 
-  FuzzHarness*[T] = object
-    target*: FuzzTargetProc[T]
+  FuzzHarness* = object
+    target*: FuzzTargetProc
     config*: FuzzConfig
     schema*: SchemaNode
+    seed*: Value
     cacheBytes*: seq[byte]
-    cacheValue*: T
+    cacheValue*: Value
     hasCache*: bool
 
 proc sameBytes(current: seq[byte]; incoming: openArray[byte]): bool =
@@ -47,64 +48,76 @@ proc writeBytesToPtr*(dest: BytePtr; data: openArray[byte]): int =
     dest[i] = data[i]
   result = data.len
 
-proc initHarness*[T](target: FuzzTargetProc[T]; config: FuzzConfig): FuzzHarness[T] {.untyped.} =
-  ## Initializes a typed fuzz harness.
-  result = FuzzHarness[T](
+proc initHarness*(target: FuzzTargetProc; seed: Value;
+    schema: SchemaNode; config: FuzzConfig): FuzzHarness =
+  ## Initializes a value-based fuzz harness.
+  result = FuzzHarness(
     target: target,
     config: config,
-    schema: schemaFor(T),
+    schema: schema,
+    seed: copyValue(seed),
     cacheBytes: @[],
-    cacheValue: default(T),
+    cacheValue: copyValue(seed),
     hasCache: false
   )
 
-proc loadCachedOrDecode[T](harness: var FuzzHarness[T]; data: openArray[byte];
-    value: var T): bool {.untyped.} =
+proc loadCachedOrDecode(harness: var FuzzHarness; data: openArray[byte];
+    value: var Value): bool =
   if harness.hasCache and sameBytes(harness.cacheBytes, data):
-    value = harness.cacheValue
+    value = copyValue(harness.cacheValue)
     result = true
   else:
     result = tryDecodeInput(data, value)
     if result:
       harness.cacheBytes = copyBytes(data)
-      harness.cacheValue = value
+      harness.cacheValue = copyValue(value)
       harness.hasCache = true
 
-proc testOneInput*[T](harness: var FuzzHarness[T]; data: openArray[byte]): cint {.
-    untyped.} =
+proc testOneInput*(harness: var FuzzHarness; data: openArray[byte]): cint =
   ## Executes the fuzz target for one encoded structured input.
-  var input = default(T)
+  var input = default(Value)
   if loadCachedOrDecode(harness, data, input):
     harness.target(input)
   result = 0
 
-proc customMutator*[T](harness: var FuzzHarness[T];
-    data: openArray[byte]; maxLen: int; seed: uint32): seq[byte] {.untyped.} =
+proc customMutator*(harness: var FuzzHarness;
+    data: openArray[byte]; maxLen: int; seed: uint32): seq[byte] =
   ## Mutates an encoded structured input and returns the new bytes.
-  var current = default(T)
+  var current = default(Value)
   if not loadCachedOrDecode(harness, data, current):
-    current = default(T)
-  mutateValue(current, harness.config, [current], seed)
+    current = copyValue(harness.seed)
+  var sources: seq[Value] = @[]
+  sources.add copyValue(current)
+  mutateValue(current, harness.schema, harness.config, sources, seed)
   result = encodeInput(current)
   if result.len > maxLen:
-    trimBytes(result, min(data.len, maxLen))
-    if data.len > 0 and result.len > 0:
-      for i in 0..<result.len:
-        result[i] = data[i]
+    current = copyValue(harness.seed)
+    result = encodeInput(current)
+    if result.len > maxLen:
+      result = copyBytes(data)
+      if result.len > maxLen:
+        trimBytes(result, maxLen)
   harness.cacheBytes = copyBytes(result)
-  harness.cacheValue = current
+  harness.cacheValue = copyValue(current)
   harness.hasCache = true
 
-proc customCrossOver*[T](harness: var FuzzHarness[T]; left, right: openArray[byte];
-    maxOutLen: int; seed: uint32): seq[byte] {.untyped.} =
+proc customCrossOver*(harness: var FuzzHarness; left, right: openArray[byte];
+    maxOutLen: int; seed: uint32): seq[byte] =
   ## Crosses two encoded structured inputs and returns the encoded result.
-  var a = default(T)
-  var b = default(T)
+  var a = default(Value)
+  var b = default(Value)
   if not tryDecodeInput(left, a):
-    a = default(T)
+    a = copyValue(harness.seed)
   if not tryDecodeInput(right, b):
-    b = default(T)
-  crossOverValue(a, harness.config, [b], seed)
+    b = copyValue(harness.seed)
+  var donors: seq[Value] = @[]
+  donors.add copyValue(b)
+  crossOverValue(a, harness.schema, harness.config, donors, seed)
   result = encodeInput(a)
   if result.len > maxOutLen:
-    trimBytes(result, maxOutLen)
+    a = copyValue(harness.seed)
+    result = encodeInput(a)
+    if result.len > maxOutLen:
+      result = copyBytes(left)
+      if result.len > maxOutLen:
+        trimBytes(result, maxOutLen)

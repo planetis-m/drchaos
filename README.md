@@ -1,15 +1,15 @@
 # drchaos
 
-`drchaos` turns a typed Nim proc into a LibFuzzer target with structure-aware mutation and generated `LLVMFuzzer*` entrypoints.
+`drchaos` is a Nimony plugin and runtime for structure-aware fuzzing. It generates LibFuzzer entrypoints, mutates a dynamic `Value` tree, and leaves domain conversion in user code.
 
-It is aimed at `nimony` projects that want libprotobuf-mutator-style shape-aware fuzzing without writing fuzz glue by hand.
+The design is intentionally non-generic at the API edge:
 
-## Why try it?
+- `drchaos` knows a fixed set of container/value shapes: `bool`, `int`, `float`, `string`, `seq`, object fields, and optional values.
+- You describe the fuzzable shape explicitly with `drChaosSchema`.
+- You provide a matching seed with `drChaosSeed`.
+- Your target takes `Value` and converts it into your own domain type with ordinary Nim procs.
 
-- Your input type is the schema. Objects, enums, `seq`, `ref`, and `Option[T]` become mutation-aware immediately.
-- The harness is generated for you. `fuzzTarget:` emits `LLVMFuzzerTestOneInput`, `LLVMFuzzerCustomMutator`, and `LLVMFuzzerCustomCrossOver`.
-- Mutations are structural, not just byte flips. The engine can add, delete, copy, clone, and recursively mutate nested fields.
-- Corpus data stays typed. The mutator works on structured nodes and only serializes at the input boundary.
+That keeps the runtime simple and makes custom formats straightforward: write a converter once, then fuzz your real type.
 
 ## Quick start
 
@@ -28,14 +28,34 @@ type
     kind: MessageKind
     header: string
     values: seq[int32]
-    retry: Option[int16]
+    retry: bool
+    retryValue: int16
+
+proc decodeMessage(value: Value; outp: var Message): bool =
+  discard
 
 fuzzTarget:
-  proc fuzzMessage(input: Message) =
-    if input.kind == mkCommand and input.header == "panic":
-      if input.values.len == 3 and input.retry.hasValue:
-        if input.retry.value == 7'i16:
-          crashNow()
+  var drChaosSchema = objectSchema(@[
+    fieldSchema("kind", stringSchema()),
+    fieldSchema("header", stringSchema()),
+    fieldSchema("values", seqSchema(intSchema())),
+    fieldSchema("retry", optionSchema(intSchema()))
+  ])
+
+  var drChaosSeed = objectValue(@[
+    field("kind", stringValue("ping")),
+    field("header", stringValue("")),
+    field("values", arrayValue(newSeq[Value](0))),
+    field("retry", noneValue())
+  ])
+
+  proc fuzzMessage(input: Value) =
+    var message = Message()
+    if not decodeMessage(input, message):
+      return
+    if message.kind == mkCommand and message.header == "panic":
+      if message.values.len == 3 and message.retry and message.retryValue == 7'i16:
+        crashNow()
 ```
 
 Compile it from the repo root:
@@ -44,45 +64,52 @@ Compile it from the repo root:
 nimony c examples/simple.nim
 ```
 
+## How it works
+
+1. `fuzzTarget:` expands to `LLVMFuzzerTestOneInput`, `LLVMFuzzerCustomMutator`, and `LLVMFuzzerCustomCrossOver`.
+2. Corpus bytes decode into `Value`.
+3. The mutator performs structural operations on that tree.
+4. Your target converts `Value` into a domain object and checks interesting behavior.
+
+## Value model
+
+The public runtime builders are:
+
+- `boolValue`
+- `intValue`
+- `floatValue`
+- `stringValue`
+- `arrayValue`
+- `objectValue`
+- `noneValue`
+- `someValue`
+- `field`
+
+The matching schema builders are:
+
+- `boolSchema`
+- `intSchema`
+- `floatSchema`
+- `stringSchema`
+- `enumSchema`
+- `seqSchema`
+- `optionSchema`
+- `fieldSchema`
+- `objectSchema`
+
 ## Example set
 
-- `examples/simple.nim` shows the smallest useful target with enum, sequence, and optional-field mutations.
-- `examples/http_request.nim` models a nested request object with headers, auth, and body fields.
-- `examples/state_machine.nim` focuses on ordered steps plus `ref` children, which is useful for workflow and parser-state targets.
-- `examples/graph_smoke.nim` is the harder example. It uses a graph-shaped input and a small corpus-evolution loop to exercise mutation, crossover, and target execution together.
-- `examples/seed_corpus.nim` shows how to turn typed values into corpus bytes and decode them back.
-
-## Writing targets
-
-The target proc takes one typed input. That type becomes the shape the mutator explores.
-
-Good target shapes:
-
-- Request or command objects with enums, repeated fields, and optional sub-objects.
-- Stateful programs represented as `seq[Step]`.
-- Parsers that naturally map to nested objects instead of raw strings.
-
-Less useful target shapes:
-
-- A single `string` or `seq[byte]` when you already know the grammar and want structural mutation.
-- Flat objects with only one or two scalar fields.
+- `examples/simple.nim`: smallest end-to-end target with enum-like strings, arrays, and an optional field.
+- `examples/http_request.nim`: nested request/auth/header shape with field-by-field decoding.
+- `examples/state_machine.nim`: ordered workflow input with optional snapshots.
+- `examples/seed_corpus.nim`: building corpus bytes from `Value` and decoding them back into a domain object.
+- `examples/graph_smoke.nim`: heavier stress target used to exercise mutation and crossover on a more connected shape.
 
 ## Corpus helpers
 
-`drchaos` includes a small wire format for corpus materialization:
-
-- `encodeInput(value)` serializes a typed value.
-- `tryDecodeInput(data, value)` decodes into an existing variable and returns `false` on malformed input.
-- `decodeInput[T](data)` returns a decoded value or `default(T)` on failure.
-
-The corpus helper example is in `examples/seed_corpus.nim`.
-
-## What you get
-
-- `fuzzTarget`: plugin entrypoint for declaring a harness.
-- `Option[T]`: small option type used by the examples and runtime.
-- `encodeInput` / `tryDecodeInput` / `decodeInput`: corpus helpers.
-- `customMutator` / `customCrossOver` / `testOneInput`: runtime glue used by generated harnesses.
+- `encodeInput(value)` serializes a `Value`.
+- `tryDecodeInput(data, value)` decodes into an existing `Value` and returns `false` on malformed input.
+- `decodeInput(data)` returns a decoded `Value` or `default(Value)` on failure.
 
 ## Run the examples
 
@@ -90,12 +117,6 @@ The corpus helper example is in `examples/seed_corpus.nim`.
 nimony c examples/simple.nim
 nimony c examples/http_request.nim
 nimony c examples/state_machine.nim
-nimony c examples/graph_smoke.nim
 nimony c examples/seed_corpus.nim
-```
-
-To run the graph smoke test as an executable:
-
-```bash
-nimony c -r examples/graph_smoke.nim
+nimony c examples/graph_smoke.nim
 ```

@@ -1,54 +1,43 @@
-## LPM-style structure-aware mutator over decoded structured node trees.
+## LPM-style structure-aware mutator over dynamic value trees.
 
-import model, option, rng, schema
+import model, rng, schema
 
-proc defaultNode(schema: SchemaNode): FuzzNode
+proc defaultNode(schema: SchemaNode): Value
 proc clampInt(value, lowValue, highValue: int): int
-proc nodeFromValue(value: bool): FuzzNode
-proc nodeFromValue[T: SomeInteger](value: T): FuzzNode
-proc nodeFromValue[T: SomeFloat](value: T): FuzzNode
-proc nodeFromValue(value: string): FuzzNode
-proc nodeFromValue[T: enum](value: T): FuzzNode
-proc nodeFromValue[T](value: seq[T]): FuzzNode {.untyped.}
-proc nodeFromValue[I, T](value: array[I, T]): FuzzNode {.untyped.}
-proc nodeFromValue[T](value: Option[T]): FuzzNode {.untyped.}
-proc nodeFromValue[T](value: ref T): FuzzNode {.untyped.}
-proc nodeFromValue[T: object](value: T): FuzzNode
-proc valueFromNode(node: FuzzNode; value: var bool)
-proc valueFromNode[T: SomeInteger](node: FuzzNode; value: var T)
-proc valueFromNode[T: SomeFloat](node: FuzzNode; value: var T)
-proc valueFromNode(node: FuzzNode; value: var string)
-proc valueFromNode[T: enum](node: FuzzNode; value: var T)
-proc valueFromNode[T](node: FuzzNode; value: var seq[T]) {.untyped.}
-proc valueFromNode[I, T](node: FuzzNode; value: var array[I, T]) {.untyped.}
-proc valueFromNode[T](node: FuzzNode; value: var Option[T]) {.untyped.}
-proc valueFromNode[T](node: FuzzNode; value: var ref T) {.untyped.}
-proc valueFromNode[T: object](node: FuzzNode; value: var T)
 
-proc deepCopyNode(node: FuzzNode): FuzzNode =
-  case node
-  of BoolNode:
-    result = BoolNode(boolVal: node.boolVal)
-  of IntNode:
-    result = IntNode(intVal: node.intVal)
-  of FloatNode:
-    result = FloatNode(floatVal: node.floatVal)
-  of StringNode:
-    result = StringNode(stringVal: node.stringVal)
-  of EnumNode:
-    result = EnumNode(enumVal: node.enumVal)
-  of SeqNode:
-    result = SeqNode(elems: @[])
-    for item in node.elems:
-      result.elems.add deepCopyNode(item)
-  of ObjectNode:
-    result = ObjectNode(fields: @[])
-    for field in node.fields:
-      result.fields.add FieldNode(name: field.name, value: deepCopyNode(field.value))
-  of OptionNode:
-    result = OptionNode(optVal: @[])
-    if node.optVal.len > 0:
-      result.optVal.add deepCopyNode(node.optVal[0])
+proc newChild(value: Value): ref FuzzNode =
+  new result
+  result[] = value
+
+proc copyValue*(value: Value): Value =
+  ## Performs a deep copy of a dynamic value tree.
+  case nodeKind(value)
+  of nkBool:
+    return BoolNode(boolVal: value.boolVal)
+  of nkInt:
+    return IntNode(intVal: value.intVal)
+  of nkFloat:
+    return FloatNode(floatVal: value.floatVal)
+  of nkString:
+    return StringNode(stringVal: value.stringVal)
+  of nkEnum:
+    return EnumNode(enumVal: value.enumVal)
+  of nkSeq:
+    var copied: Value = SeqNode(elems: @[])
+    for item in value.elems:
+      copied.elems.add newChild(copyValue(item[]))
+    return copied
+  of nkObject:
+    var copied: Value = ObjectNode(fieldNames: @[], fieldValues: @[])
+    for i in 0..<min(value.fieldNames.len, value.fieldValues.len):
+      copied.fieldNames.add value.fieldNames[i]
+      copied.fieldValues.add newChild(copyValue(value.fieldValues[i][]))
+    return copied
+  of nkOption:
+    var copied: Value = OptionNode(optVal: nil)
+    if value.optVal != nil:
+      copied.optVal = newChild(copyValue(value.optVal[]))
+    return copied
 
 proc appendIndex(path: seq[int]; index: int): seq[int] =
   result = newSeq[int](path.len + 1)
@@ -56,26 +45,33 @@ proc appendIndex(path: seq[int]; index: int): seq[int] =
     result[i] = path[i]
   result[path.len] = index
 
-proc trimNodes(items: var seq[FuzzNode]; newLen: int) =
+proc trimNodes(items: var seq[ref FuzzNode]; newLen: int) =
   let limit = clampInt(newLen, 0, items.len)
-  var resized: seq[FuzzNode] = @[]
+  var resized: seq[ref FuzzNode] = @[]
   for i in 0..<limit:
     resized.add items[i]
   items = resized
 
-proc removeNodeAt(items: var seq[FuzzNode]; index: int) =
+proc trimStrings(items: var seq[string]; newLen: int) =
+  let limit = clampInt(newLen, 0, items.len)
+  var resized: seq[string] = @[]
+  for i in 0..<limit:
+    resized.add items[i]
+  items = resized
+
+proc removeNodeAt(items: var seq[ref FuzzNode]; index: int) =
   if items.len == 0:
     return
   let at = clampInt(index, 0, items.high)
-  var resized: seq[FuzzNode] = @[]
+  var resized: seq[ref FuzzNode] = @[]
   for i in 0..<items.len:
     if i != at:
       resized.add items[i]
   items = resized
 
-proc insertNodeAt(items: var seq[FuzzNode]; index: int; item: FuzzNode) =
+proc insertNodeAt(items: var seq[ref FuzzNode]; index: int; item: ref FuzzNode) =
   let at = clampInt(index, 0, items.len)
-  var resized: seq[FuzzNode] = @[]
+  var resized: seq[ref FuzzNode] = @[]
   for i in 0..<at:
     resized.add items[i]
   resized.add item
@@ -83,224 +79,62 @@ proc insertNodeAt(items: var seq[FuzzNode]; index: int; item: FuzzNode) =
     resized.add items[i]
   items = resized
 
-proc nodeFromSeq[T](value: seq[T]): FuzzNode {.untyped.} =
-  result = SeqNode(elems: @[])
-  for item in value:
-    result.elems.add nodeFromValue(item)
+proc emptySeqNode(): Value =
+  return SeqNode(elems: @[])
 
-proc nodeFromArray[I, T](value: array[I, T]): FuzzNode {.untyped.} =
-  result = SeqNode(elems: @[])
-  for item in value:
-    result.elems.add nodeFromValue(item)
+proc emptyObjectNode(): Value =
+  return ObjectNode(fieldNames: @[], fieldValues: @[])
 
-proc nodeFromOption[T](value: Option[T]): FuzzNode {.untyped.} =
-  if value.hasValue:
-    result = OptionNode(optVal: @[nodeFromValue(value.value)])
-  else:
-    result = OptionNode(optVal: @[])
+proc emptyOptionNode(): Value =
+  return OptionNode(optVal: nil)
 
-proc nodeFromRef[T](value: ref T): FuzzNode {.untyped.} =
-  if value != nil:
-    result = OptionNode(optVal: @[nodeFromValue(value[])])
-  else:
-    result = OptionNode(optVal: @[])
+proc someOptionNode(value: Value): Value =
+  return OptionNode(optVal: newChild(value))
 
-proc nodeFromObject[T: object](value: T): FuzzNode =
-  result = ObjectNode(fields: @[])
-  for fieldName, field in fieldPairs(value):
-    result.fields.add FieldNode(name: fieldName, value: nodeFromValue(field))
-
-proc nodeFromValue(value: bool): FuzzNode =
-  result = BoolNode(boolVal: value)
-
-proc nodeFromValue[T: SomeInteger](value: T): FuzzNode =
-  result = IntNode(intVal: int64(value))
-
-proc nodeFromValue[T: SomeFloat](value: T): FuzzNode =
-  result = FloatNode(floatVal: float64(value))
-
-proc nodeFromValue(value: string): FuzzNode =
-  result = StringNode(stringVal: value)
-
-proc nodeFromValue[T: enum](value: T): FuzzNode =
-  result = EnumNode(enumVal: int64(value.ord))
-
-proc nodeFromValue[T](value: seq[T]): FuzzNode {.untyped.} =
-  result = nodeFromSeq(value)
-
-proc nodeFromValue[I, T](value: array[I, T]): FuzzNode {.untyped.} =
-  result = nodeFromArray(value)
-
-proc nodeFromValue[T](value: Option[T]): FuzzNode {.untyped.} =
-  result = nodeFromOption(value)
-
-proc nodeFromValue[T](value: ref T): FuzzNode {.untyped.} =
-  result = nodeFromRef(value)
-
-proc nodeFromValue[T: object](value: T): FuzzNode =
-  result = nodeFromObject(value)
-
-proc valueFromSeq[T](node: FuzzNode; value: var seq[T]) {.untyped.} =
-  case node
-  of SeqNode:
-    value = newSeq[T](node.elems.len)
-    for i in 0..<node.elems.len:
-      valueFromNode(node.elems[i], value[i])
-  else:
-    discard
-
-proc valueFromArray[I, T](node: FuzzNode; value: var array[I, T]) {.untyped.} =
-  case node
-  of SeqNode:
-    let limit = min(node.elems.len, value.len)
-    for i in 0..<limit:
-      valueFromNode(node.elems[i], value[i])
-  else:
-    discard
-
-proc valueFromOption[T](node: FuzzNode; value: var Option[T]) {.untyped.} =
-  case node
-  of OptionNode:
-    if node.optVal.len > 0:
-      var item = default(T)
-      valueFromNode(node.optVal[0], item)
-      value = some(item)
-    else:
-      value = none[T]()
-  else:
-    discard
-
-proc valueFromRef[T](node: FuzzNode; value: var ref T) {.untyped.} =
-  case node
-  of OptionNode:
-    if node.optVal.len > 0:
-      new(value)
-      valueFromNode(node.optVal[0], value[])
-    else:
-      value = nil
-  else:
-    discard
-
-proc valueFromObject[T: object](node: FuzzNode; outp: var T) {.untyped.} =
-  case node
-  of ObjectNode:
-    outp = default(T)
-    for inputField in node.fields:
-      for fieldName, field in fieldPairs(outp):
-        if fieldName == inputField.name:
-          valueFromNode(inputField.value, field)
-          break
-  else:
-    discard
-
-proc valueFromNode(node: FuzzNode; value: var bool) =
-  case node
-  of BoolNode:
-    value = node.boolVal
-  else:
-    discard
-
-proc valueFromNode[T: SomeInteger](node: FuzzNode; value: var T) =
-  case node
-  of IntNode:
-    value = T(node.intVal)
-  of EnumNode:
-    value = T(node.enumVal)
-  else:
-    discard
-
-proc valueFromNode[T: SomeFloat](node: FuzzNode; value: var T) =
-  case node
-  of FloatNode:
-    value = T(node.floatVal)
-  else:
-    discard
-
-proc valueFromNode(node: FuzzNode; value: var string) =
-  case node
-  of StringNode:
-    value = node.stringVal
-  else:
-    discard
-
-proc valueFromNode[T: enum](node: FuzzNode; value: var T) =
-  var ordinal = 0
-  case node
-  of EnumNode:
-    ordinal = int(node.enumVal)
-  of IntNode:
-    ordinal = int(node.intVal)
-  else:
-    return
-
-  if ordinal < low(T).ord:
-    value = low(T)
-  elif ordinal > high(T).ord:
-    value = high(T)
-  else:
-    value = T(ordinal)
-
-proc valueFromNode[T](node: FuzzNode; value: var seq[T]) {.untyped.} =
-  valueFromSeq(node, value)
-
-proc valueFromNode[I, T](node: FuzzNode; value: var array[I, T]) {.untyped.} =
-  valueFromArray(node, value)
-
-proc valueFromNode[T](node: FuzzNode; value: var Option[T]) {.untyped.} =
-  valueFromOption(node, value)
-
-proc valueFromNode[T](node: FuzzNode; value: var ref T) {.untyped.} =
-  valueFromRef(node, value)
-
-proc valueFromNode[T: object](node: FuzzNode; value: var T) =
-  valueFromObject(node, value)
-
-proc approxSize(node: FuzzNode): int =
+proc approxSize(value: Value): int =
   result = 0
-  case node
-  of BoolNode:
+  case nodeKind(value)
+  of nkBool:
     result = 1
-  of IntNode:
+  of nkInt, nkEnum, nkFloat:
     result = 8
-  of FloatNode:
-    result = 8
-  of EnumNode:
-    result = 8
-  of StringNode:
-    result = node.stringVal.len
-  of SeqNode:
-    for item in node.elems:
-      result.inc approxSize(item)
-  of ObjectNode:
-    for field in node.fields:
-      result.inc field.name.len
-      result.inc approxSize(field.value)
-  of OptionNode:
-    if node.optVal.len > 0:
-      result = 1 + approxSize(node.optVal[0])
+  of nkString:
+    result = value.stringVal.len
+  of nkSeq:
+    for item in value.elems:
+      result.inc approxSize(item[])
+  of nkObject:
+    for i in 0..<min(value.fieldNames.len, value.fieldValues.len):
+      result.inc value.fieldNames[i].len
+      result.inc approxSize(value.fieldValues[i][])
+  of nkOption:
+    if value.optVal != nil:
+      result = 1 + approxSize(value.optVal[])
     else:
       result = 1
 
-proc defaultNode(schema: SchemaNode): FuzzNode =
-  case schema
-  of BoolSchema:
-    result = BoolNode(boolVal: false)
-  of IntSchema:
-    result = IntNode(intVal: 0)
-  of FloatSchema:
-    result = FloatNode(floatVal: 0.0)
-  of StringSchema:
-    result = StringNode(stringVal: "")
-  of EnumSchema:
-    result = EnumNode(enumVal: 0)
-  of SeqSchema:
-    result = SeqNode(elems: @[])
-  of ObjectSchema:
-    result = ObjectNode(fields: @[])
-    for field in schema.fields:
-      result.fields.add FieldNode(name: field.name, value: defaultNode(field.node))
-  of OptionSchema:
-    result = OptionNode(optVal: @[])
+proc defaultNode(schema: SchemaNode): Value =
+  case schema.kind
+  of skBool:
+    return BoolNode(boolVal: false)
+  of skInt:
+    return IntNode(intVal: 0)
+  of skFloat:
+    return FloatNode(floatVal: 0.0)
+  of skString:
+    return StringNode(stringVal: "")
+  of skEnum:
+    return EnumNode(enumVal: 0)
+  of skSeq:
+    return SeqNode(elems: @[])
+  of skObject:
+    var built: Value = ObjectNode(fieldNames: @[], fieldValues: @[])
+    for item in schema.fields:
+      built.fieldNames.add item.name
+      built.fieldValues.add newChild(defaultNode(item.node))
+    return built
+  of skOption:
+    return OptionNode(optVal: nil)
 
 proc mutateInt(value: int64; r: var Rand): int64 =
   let bit = r.randInt(0, 62)
@@ -331,77 +165,61 @@ proc clampInt(value, lowValue, highValue: int): int =
   else:
     result = value
 
-proc mutateLeaf(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+proc mutateLeaf(value: var Value; schema: SchemaNode; config: FuzzConfig;
     r: var Rand) =
-  case node
-  of BoolNode:
-    node = BoolNode(boolVal: not node.boolVal)
-  of IntNode:
-    node = IntNode(intVal: mutateInt(node.intVal, r))
-  of EnumNode:
-    case schema
-    of EnumSchema:
-      if schema.enumNames.len > 1:
-        let current = clampInt(node.enumVal.int, 0, schema.enumNames.high)
-        var next = current
-        while next == current:
-          next = r.randInt(0, schema.enumNames.high)
-        node = EnumNode(enumVal: next)
+  case nodeKind(value)
+  of nkBool:
+    value = BoolNode(boolVal: not value.boolVal)
+  of nkInt:
+    value = IntNode(intVal: mutateInt(value.intVal, r))
+  of nkEnum:
+    if schema.enumNames.len > 1:
+      let current = clampInt(value.enumVal.int, 0, schema.enumNames.high)
+      var next = current
+      while next == current:
+        next = r.randInt(0, schema.enumNames.high)
+      value = EnumNode(enumVal: next)
     else:
-      discard
-  of FloatNode:
-    node = FloatNode(floatVal: mutateFloat(node.floatVal, r))
-  of StringNode:
-    node = StringNode(stringVal: mutateString(node.stringVal, config, r))
-  of SeqNode, ObjectNode, OptionNode:
+      value = EnumNode(enumVal: mutateInt(value.enumVal, r))
+  of nkFloat:
+    value = FloatNode(floatVal: mutateFloat(value.floatVal, r))
+  of nkString:
+    value = StringNode(stringVal: mutateString(value.stringVal, config, r))
+  of nkSeq, nkObject, nkOption:
     discard
 
-proc seedNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+proc seedNode(value: var Value; schema: SchemaNode; config: FuzzConfig;
     r: var Rand; depth = 0) =
-  case node
-  of BoolNode, IntNode, FloatNode, StringNode, EnumNode:
-    mutateLeaf(node, schema, config, r)
-  of SeqNode:
-    case schema
-    of SeqSchema:
-      if depth < config.maxDepth and node.elems.len < config.maxSeqLen:
-        let additions = 1 + r.randInt(min(1, config.maxSeqLen - 1))
-        for _ in 0..<additions:
-          var child = defaultNode(schema.elem)
-          if depth + 1 < config.maxDepth:
-            seedNode(child, schema.elem, config, r, depth + 1)
-          node.elems.add child
-    else:
-      discard
-  of ObjectNode:
-    case schema
-    of ObjectSchema:
-      for i in 0..<min(node.fields.len, schema.fields.len):
-        if r.randBool:
-          seedNode(node.fields[i].value, schema.fields[i].node, config, r, depth + 1)
-    else:
-      discard
-  of OptionNode:
-    case schema
-    of OptionSchema:
-      if node.optVal.len == 0 and depth < config.maxDepth:
+  case nodeKind(value)
+  of nkBool, nkInt, nkFloat, nkString, nkEnum:
+    mutateLeaf(value, schema, config, r)
+  of nkSeq:
+    if depth < config.maxDepth and value.elems.len < config.maxSeqLen:
+      let additions = 1 + r.randInt(min(1, config.maxSeqLen - 1))
+      for _ in 0..<additions:
         var child = defaultNode(schema.elem)
         if depth + 1 < config.maxDepth:
           seedNode(child, schema.elem, config, r, depth + 1)
-        node.optVal = @[child]
-    else:
-      discard
+        value.elems.add newChild(child)
+  of nkObject:
+    for i in 0..<min(value.fieldValues.len, schema.fields.len):
+      if r.randBool:
+        seedNode(value.fieldValues[i][], schema.fields[i].node, config, r, depth + 1)
+  of nkOption:
+    if value.optVal == nil and depth < config.maxDepth:
+      var child = defaultNode(schema.elem)
+      if depth + 1 < config.maxDepth:
+        seedNode(child, schema.elem, config, r, depth + 1)
+      value.optVal = newChild(child)
 
 proc schemaAtPath(schema: SchemaNode; path: openArray[int]; depth = 0): SchemaNode =
   if depth >= path.len:
     return schema
   let index = path[depth]
-  case schema
-  of SeqSchema:
+  case schema.kind
+  of skSeq, skOption:
     result = schemaAtPath(schema.elem, path, depth + 1)
-  of OptionSchema:
-    result = schemaAtPath(schema.elem, path, depth + 1)
-  of ObjectSchema:
+  of skObject:
     if index < schema.fields.len:
       result = schemaAtPath(schema.fields[index].node, path, depth + 1)
     else:
@@ -409,146 +227,104 @@ proc schemaAtPath(schema: SchemaNode; path: openArray[int]; depth = 0): SchemaNo
   else:
     result = schema
 
-proc mutateAtPath(node: var FuzzNode; schema: SchemaNode; path: openArray[int];
+proc mutateAtPath(value: var Value; schema: SchemaNode; path: openArray[int];
     config: FuzzConfig; r: var Rand; depth = 0) =
   if depth >= path.len:
-    mutateLeaf(node, schema, config, r)
+    mutateLeaf(value, schema, config, r)
     return
   let index = path[depth]
-  case node
-  of SeqNode:
-    case schema
-    of SeqSchema:
-      if index < node.elems.len:
-        mutateAtPath(node.elems[index], schema.elem, path, config, r, depth + 1)
-    else:
-      discard
-  of ObjectNode:
-    case schema
-    of ObjectSchema:
-      if index < node.fields.len and index < schema.fields.len:
-        mutateAtPath(node.fields[index].value, schema.fields[index].node, path, config, r, depth + 1)
-    else:
-      discard
-  of OptionNode:
-    case schema
-    of OptionSchema:
-      if node.optVal.len > 0:
-        mutateAtPath(node.optVal[0], schema.elem, path, config, r, depth + 1)
-    else:
-      discard
+  case nodeKind(value)
+  of nkSeq:
+    if index < value.elems.len:
+      mutateAtPath(value.elems[index][], schema.elem, path, config, r, depth + 1)
+  of nkObject:
+    if index < value.fieldValues.len:
+      mutateAtPath(value.fieldValues[index][], schema.fields[index].node, path, config, r, depth + 1)
+  of nkOption:
+    if value.optVal != nil:
+      mutateAtPath(value.optVal[], schema.elem, path, config, r, depth + 1)
   else:
     discard
 
-proc addAtPath(node: var FuzzNode; schema: SchemaNode; path: openArray[int];
+proc addAtPath(value: var Value; schema: SchemaNode; path: openArray[int];
     config: FuzzConfig; r: var Rand; depth = 0) =
   if depth >= path.len:
-    case node
-    of SeqNode:
-      case schema
-      of SeqSchema:
-        if node.elems.len < config.maxSeqLen:
-          var child = defaultNode(schema.elem)
-          seedNode(child, schema.elem, config, r, depth + 1)
-          insertNodeAt(node.elems, r.randInt(0, node.elems.len), child)
-      else:
-        discard
-    of OptionNode:
-      case schema
-      of OptionSchema:
-        if node.optVal.len == 0:
-          var child = defaultNode(schema.elem)
-          seedNode(child, schema.elem, config, r, depth + 1)
-          node.optVal = @[child]
-      else:
-        discard
+    case nodeKind(value)
+    of nkSeq:
+      if value.elems.len < config.maxSeqLen:
+        var child = defaultNode(schema.elem)
+        seedNode(child, schema.elem, config, r, depth + 1)
+        insertNodeAt(value.elems, r.randInt(0, value.elems.len), newChild(child))
+    of nkOption:
+      if value.optVal == nil:
+        var child = defaultNode(schema.elem)
+        seedNode(child, schema.elem, config, r, depth + 1)
+        value.optVal = newChild(child)
     else:
       discard
     return
-
   let index = path[depth]
-  case node
-  of SeqNode:
-    case schema
-    of SeqSchema:
-      if index < node.elems.len:
-        addAtPath(node.elems[index], schema.elem, path, config, r, depth + 1)
-    else:
-      discard
-  of ObjectNode:
-    case schema
-    of ObjectSchema:
-      if index < node.fields.len and index < schema.fields.len:
-        addAtPath(node.fields[index].value, schema.fields[index].node, path, config, r, depth + 1)
-    else:
-      discard
-  of OptionNode:
-    case schema
-    of OptionSchema:
-      if node.optVal.len > 0:
-        addAtPath(node.optVal[0], schema.elem, path, config, r, depth + 1)
-    else:
-      discard
+  case nodeKind(value)
+  of nkSeq:
+    if index < value.elems.len:
+      addAtPath(value.elems[index][], schema.elem, path, config, r, depth + 1)
+  of nkObject:
+    if index < value.fieldValues.len:
+      addAtPath(value.fieldValues[index][], schema.fields[index].node, path, config, r, depth + 1)
+  of nkOption:
+    if value.optVal != nil:
+      addAtPath(value.optVal[], schema.elem, path, config, r, depth + 1)
   else:
     discard
 
-proc deleteAtPath(node: var FuzzNode; path: openArray[int]; r: var Rand;
+proc deleteAtPath(value: var Value; path: openArray[int]; r: var Rand;
     depth = 0) =
   if depth >= path.len:
-    case node
-    of SeqNode:
-      if node.elems.len > 0:
-        removeNodeAt(node.elems, r.randInt(node.elems.high))
-    of OptionNode:
-      node.optVal = @[]
+    case nodeKind(value)
+    of nkSeq:
+      if value.elems.len > 0:
+        removeNodeAt(value.elems, r.randInt(value.elems.high))
+    of nkOption:
+      value.optVal = nil
     else:
       discard
     return
-
   let index = path[depth]
-  case node
-  of SeqNode:
-    if index < node.elems.len:
-      deleteAtPath(node.elems[index], path, r, depth + 1)
-  of ObjectNode:
-    if index < node.fields.len:
-      deleteAtPath(node.fields[index].value, path, r, depth + 1)
-  of OptionNode:
-    if node.optVal.len > 0:
-      deleteAtPath(node.optVal[0], path, r, depth + 1)
+  case nodeKind(value)
+  of nkSeq:
+    if index < value.elems.len:
+      deleteAtPath(value.elems[index][], path, r, depth + 1)
+  of nkObject:
+    if index < value.fieldValues.len:
+      deleteAtPath(value.fieldValues[index][], path, r, depth + 1)
+  of nkOption:
+    if value.optVal != nil:
+      deleteAtPath(value.optVal[], path, r, depth + 1)
   else:
     discard
 
-proc assignAtPath(node: var FuzzNode; path: openArray[int]; donor: FuzzNode;
+proc assignAtPath(value: var Value; path: openArray[int]; donor: Value;
     config: FuzzConfig; isClone: bool; r: var Rand; depth = 0) =
   if depth >= path.len:
-    case node
-    of SeqNode:
-      if isClone:
-        if node.elems.len < config.maxSeqLen:
-          insertNodeAt(node.elems, r.randInt(0, node.elems.len), donor)
-      else:
-        node = donor
-    of OptionNode:
-      if isClone:
-        node.optVal = @[donor]
-      else:
-        node = donor
+    if isClone and nodeKind(value) == nkSeq:
+      if value.elems.len < config.maxSeqLen:
+        insertNodeAt(value.elems, r.randInt(0, value.elems.len), newChild(copyValue(donor)))
+    elif isClone and nodeKind(value) == nkOption:
+      value.optVal = newChild(copyValue(donor))
     else:
-      node = donor
+      value = copyValue(donor)
     return
-
   let index = path[depth]
-  case node
-  of SeqNode:
-    if index < node.elems.len:
-      assignAtPath(node.elems[index], path, donor, config, isClone, r, depth + 1)
-  of ObjectNode:
-    if index < node.fields.len:
-      assignAtPath(node.fields[index].value, path, donor, config, isClone, r, depth + 1)
-  of OptionNode:
-    if node.optVal.len > 0:
-      assignAtPath(node.optVal[0], path, donor, config, isClone, r, depth + 1)
+  case nodeKind(value)
+  of nkSeq:
+    if index < value.elems.len:
+      assignAtPath(value.elems[index][], path, donor, config, isClone, r, depth + 1)
+  of nkObject:
+    if index < value.fieldValues.len:
+      assignAtPath(value.fieldValues[index][], path, donor, config, isClone, r, depth + 1)
+  of nkOption:
+    if value.optVal != nil:
+      assignAtPath(value.optVal[], path, donor, config, isClone, r, depth + 1)
   else:
     discard
 
@@ -557,7 +333,9 @@ proc candidateWeight(schema: SchemaNode; op: MutationKind): int =
   case op
   of mkMutate:
     result = baseWeight * 4
-  of mkAdd, mkClone:
+  of mkAdd:
+    result = baseWeight * 3
+  of mkClone:
     result = baseWeight * 3
   of mkCopy:
     result = baseWeight * 2
@@ -572,171 +350,87 @@ proc addCandidate(outp: var seq[MutationCandidate]; op: MutationKind; path: seq[
   if weight > 0:
     outp.add MutationCandidate(op: op, path: path, weight: weight)
 
-proc collectCandidates(node: FuzzNode; schema: SchemaNode; path: seq[int];
+proc collectCandidates(value: Value; schema: SchemaNode; path: seq[int];
     config: FuzzConfig; outp: var seq[MutationCandidate]) =
-  case node
-  of BoolNode, IntNode, FloatNode, StringNode, EnumNode:
+  case nodeKind(value)
+  of nkBool, nkInt, nkFloat, nkString, nkEnum:
     addCandidate(outp, mkMutate, path, schema)
-  of SeqNode:
+  of nkSeq:
     addCandidate(outp, mkCopy, path, schema)
-    if node.elems.len < config.maxSeqLen:
+    if value.elems.len < config.maxSeqLen:
       addCandidate(outp, mkAdd, path, schema)
       addCandidate(outp, mkClone, path, schema)
-    if node.elems.len > 0:
+    if value.elems.len > 0:
       addCandidate(outp, mkDelete, path, schema)
-    case schema
-    of SeqSchema:
-      for i in 0..<node.elems.len:
-        let childPath = appendIndex(path, i)
-        collectCandidates(node.elems[i], schema.elem, childPath, config, outp)
-    else:
-      discard
-  of ObjectNode:
+    for i in 0..<value.elems.len:
+      collectCandidates(value.elems[i][], schema.elem, appendIndex(path, i), config, outp)
+  of nkObject:
     addCandidate(outp, mkCopy, path, schema)
-    case schema
-    of ObjectSchema:
-      for i in 0..<min(node.fields.len, schema.fields.len):
-        let childPath = appendIndex(path, i)
-        collectCandidates(node.fields[i].value, schema.fields[i].node, childPath, config, outp)
-    else:
-      discard
-  of OptionNode:
-    if node.optVal.len > 0:
+    for i in 0..<value.fieldValues.len:
+      collectCandidates(value.fieldValues[i][], schema.fields[i].node, appendIndex(path, i), config, outp)
+  of nkOption:
+    if value.optVal != nil:
       addCandidate(outp, mkDelete, path, schema)
       addCandidate(outp, mkCopy, path, schema)
-      case schema
-      of OptionSchema:
-        let childPath = appendIndex(path, 0)
-        collectCandidates(node.optVal[0], schema.elem, childPath, config, outp)
-      else:
-        discard
+      collectCandidates(value.optVal[], schema.elem, appendIndex(path, 0), config, outp)
     else:
       addCandidate(outp, mkAdd, path, schema)
       addCandidate(outp, mkClone, path, schema)
 
-proc collectCrossOverCandidates(node: FuzzNode; schema: SchemaNode; path: seq[int];
+proc collectCrossOverCandidates(value: Value; schema: SchemaNode; path: seq[int];
     config: FuzzConfig; outp: var seq[MutationCandidate]) =
   addCandidate(outp, mkCopy, path, schema)
-  case node
-  of SeqNode:
-    if node.elems.len < config.maxSeqLen:
+  case nodeKind(value)
+  of nkSeq:
+    if value.elems.len < config.maxSeqLen:
       addCandidate(outp, mkClone, path, schema)
-    case schema
-    of SeqSchema:
-      for i in 0..<node.elems.len:
-        let childPath = appendIndex(path, i)
-        collectCrossOverCandidates(node.elems[i], schema.elem, childPath, config, outp)
+    for i in 0..<value.elems.len:
+      collectCrossOverCandidates(value.elems[i][], schema.elem, appendIndex(path, i), config, outp)
+  of nkObject:
+    for i in 0..<value.fieldValues.len:
+      collectCrossOverCandidates(value.fieldValues[i][], schema.fields[i].node, appendIndex(path, i), config, outp)
+  of nkOption:
+    if value.optVal != nil:
+      collectCrossOverCandidates(value.optVal[], schema.elem, appendIndex(path, 0), config, outp)
     else:
-      discard
-  of ObjectNode:
-    case schema
-    of ObjectSchema:
-      for i in 0..<min(node.fields.len, schema.fields.len):
-        let childPath = appendIndex(path, i)
-        collectCrossOverCandidates(node.fields[i].value, schema.fields[i].node, childPath, config, outp)
-    else:
-      discard
-  of OptionNode:
-    case schema
-    of OptionSchema:
-      if node.optVal.len > 0:
-        let childPath = appendIndex(path, 0)
-        collectCrossOverCandidates(node.optVal[0], schema.elem, childPath, config, outp)
-      else:
-        addCandidate(outp, mkClone, path, schema)
-    else:
-      discard
+      addCandidate(outp, mkClone, path, schema)
   else:
     discard
 
 proc schemaCompatible(target, donor: SchemaNode): bool =
-  if target == nil or donor == nil:
+  if target.kind != donor.kind:
     return false
-
-  case target
-  of BoolSchema:
-    case donor
-    of BoolSchema:
-      result = true
-    else:
-      result = false
-  of IntSchema:
-    case donor
-    of IntSchema:
-      result = true
-    else:
-      result = false
-  of FloatSchema:
-    case donor
-    of FloatSchema:
-      result = true
-    else:
-      result = false
-  of StringSchema:
-    case donor
-    of StringSchema:
-      result = true
-    else:
-      result = false
-  of EnumSchema:
-    case donor
-    of EnumSchema:
-      result = target.enumNames == donor.enumNames
-    else:
-      result = false
-  of SeqSchema:
-    case donor
-    of SeqSchema:
-      result = schemaCompatible(target.elem, donor.elem)
-    else:
-      result = false
-  of OptionSchema:
-    case donor
-    of OptionSchema:
-      result = schemaCompatible(target.elem, donor.elem)
-    else:
-      result = false
-  of ObjectSchema:
-    case donor
-    of ObjectSchema:
-      if target.fields.len != donor.fields.len:
+  case target.kind
+  of skBool, skInt, skFloat, skString:
+    result = true
+  of skEnum:
+    result = target.enumNames == donor.enumNames
+  of skSeq, skOption:
+    result = schemaCompatible(target.elem, donor.elem)
+  of skObject:
+    if target.fields.len != donor.fields.len:
+      return false
+    result = true
+    for i in 0..<target.fields.len:
+      if target.fields[i].name != donor.fields[i].name:
         return false
-      result = true
-      for i in 0..<target.fields.len:
-        if target.fields[i].name != donor.fields[i].name:
-          return false
-        if not schemaCompatible(target.fields[i].node, donor.fields[i].node):
-          return false
-    else:
-      result = false
+      if not schemaCompatible(target.fields[i].node, donor.fields[i].node):
+        return false
 
-proc collectCompatibleSources(targetSchema: SchemaNode; sourceNode: FuzzNode;
-    sourceSchema: SchemaNode; outp: var seq[FuzzNode]) =
+proc collectCompatibleSources(targetSchema: SchemaNode; sourceValue: Value;
+    sourceSchema: SchemaNode; outp: var seq[Value]) =
   if schemaCompatible(targetSchema, sourceSchema):
-    outp.add deepCopyNode(sourceNode)
-
-  case sourceNode
-  of SeqNode:
-    case sourceSchema
-    of SeqSchema:
-      for child in sourceNode.elems:
-        collectCompatibleSources(targetSchema, child, sourceSchema.elem, outp)
-    else:
-      discard
-  of ObjectNode:
-    case sourceSchema
-    of ObjectSchema:
-      for i in 0..<min(sourceNode.fields.len, sourceSchema.fields.len):
-        collectCompatibleSources(targetSchema, sourceNode.fields[i].value, sourceSchema.fields[i].node, outp)
-    else:
-      discard
-  of OptionNode:
-    case sourceSchema
-    of OptionSchema:
-      if sourceNode.optVal.len > 0:
-        collectCompatibleSources(targetSchema, sourceNode.optVal[0], sourceSchema.elem, outp)
-    else:
-      discard
+    outp.add copyValue(sourceValue)
+  case nodeKind(sourceValue)
+  of nkSeq:
+    for child in sourceValue.elems:
+      collectCompatibleSources(targetSchema, child[], sourceSchema.elem, outp)
+  of nkObject:
+    for i in 0..<min(sourceValue.fieldValues.len, sourceSchema.fields.len):
+      collectCompatibleSources(targetSchema, sourceValue.fieldValues[i][], sourceSchema.fields[i].node, outp)
+  of nkOption:
+    if sourceValue.optVal != nil:
+      collectCompatibleSources(targetSchema, sourceValue.optVal[], sourceSchema.elem, outp)
   else:
     discard
 
@@ -770,196 +464,159 @@ proc donorSchemaFor(schema: SchemaNode; choice: MutationCandidate): SchemaNode =
   let targetSchema = schemaAtPath(schema, choice.path)
   case choice.op
   of mkClone:
-    case targetSchema
-    of SeqSchema:
-      result = targetSchema.elem
-    of OptionSchema:
+    if targetSchema.kind in {skSeq, skOption}:
       result = targetSchema.elem
     else:
       result = targetSchema
   else:
     result = targetSchema
 
-proc shrinkToBudget(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig) =
-  while approxSize(node) > config.maxBytes:
-    case node
-    of StringNode:
-      if node.stringVal.len == 0:
+proc shrinkToBudget(value: var Value; schema: SchemaNode; config: FuzzConfig) =
+  while approxSize(value) > config.maxBytes:
+    case nodeKind(value)
+    of nkString:
+      if value.stringVal.len == 0:
         break
-      node.stringVal.setLen(node.stringVal.len div 2)
-    of SeqNode:
-      if node.elems.len == 0:
+      value.stringVal.setLen(value.stringVal.len div 2)
+    of nkSeq:
+      if value.elems.len == 0:
         break
-      trimNodes(node.elems, node.elems.len - 1)
-    of OptionNode:
-      if node.optVal.len > 0:
-        node.optVal = @[]
+      trimNodes(value.elems, value.elems.len - 1)
+    of nkOption:
+      if value.optVal != nil:
+        value.optVal = nil
       else:
         break
-    of ObjectNode:
-      case schema
-      of ObjectSchema:
-        if node.fields.len == 0:
-          break
-        let last = node.fields.high
-        node.fields[last].value = defaultNode(schema.fields[last].node)
+    of nkObject:
+      if value.fieldValues.len == 0 or schema.fields.len == 0:
         break
-      else:
-        break
+      let last = min(value.fieldValues.high, schema.fields.high)
+      value.fieldValues[last] = newChild(defaultNode(schema.fields[last].node))
+      break
     else:
       break
 
-proc fixNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
+proc fixNode(value: var Value; schema: SchemaNode; config: FuzzConfig;
     depth = 0) =
-  ## Trims node contents to the configured depth and size limits.
   if depth >= config.maxDepth:
-    node = defaultNode(schema)
+    value = defaultNode(schema)
     return
-
-  case node
-  of StringNode:
-    if node.stringVal.len > config.maxStringLen:
-      node.stringVal.setLen(config.maxStringLen)
-  of SeqNode:
-    case schema
-    of SeqSchema:
-      if node.elems.len > config.maxSeqLen:
-        trimNodes(node.elems, config.maxSeqLen)
-      for i in 0..<node.elems.len:
-        fixNode(node.elems[i], schema.elem, config, depth + 1)
+  case nodeKind(value)
+  of nkString:
+    if schema.kind != skString:
+      value = defaultNode(schema)
+    elif value.stringVal.len > config.maxStringLen:
+      value.stringVal.setLen(config.maxStringLen)
+  of nkSeq:
+    if schema.kind != skSeq:
+      value = defaultNode(schema)
     else:
-      node = defaultNode(schema)
-  of ObjectNode:
-    case schema
-    of ObjectSchema:
-      var normalized: seq[FieldNode] = @[]
+      if value.elems.len > config.maxSeqLen:
+        trimNodes(value.elems, config.maxSeqLen)
+      for i in 0..<value.elems.len:
+        fixNode(value.elems[i][], schema.elem, config, depth + 1)
+  of nkObject:
+    if schema.kind != skObject:
+      value = defaultNode(schema)
+    else:
+      if value.fieldNames.len > schema.fields.len:
+        trimStrings(value.fieldNames, schema.fields.len)
+      if value.fieldValues.len > schema.fields.len:
+        trimNodes(value.fieldValues, schema.fields.len)
+      while value.fieldNames.len < schema.fields.len:
+        value.fieldNames.add schema.fields[value.fieldNames.len].name
+      while value.fieldValues.len < schema.fields.len:
+        value.fieldValues.add newChild(defaultNode(schema.fields[value.fieldValues.len].node))
       for i in 0..<schema.fields.len:
-        var fieldValue = defaultNode(schema.fields[i].node)
-        var found = false
-        if i < node.fields.len and node.fields[i].name == schema.fields[i].name:
-          fieldValue = node.fields[i].value
-          found = true
-        if not found:
-          for field in node.fields:
-            if field.name == schema.fields[i].name:
-              fieldValue = field.value
-              found = true
-              break
-        fixNode(fieldValue, schema.fields[i].node, config, depth + 1)
-        normalized.add FieldNode(name: schema.fields[i].name, value: fieldValue)
-      node.fields = normalized
+        value.fieldNames[i] = schema.fields[i].name
+        fixNode(value.fieldValues[i][], schema.fields[i].node, config, depth + 1)
+  of nkOption:
+    if schema.kind != skOption:
+      value = defaultNode(schema)
     else:
-      node = defaultNode(schema)
-  of OptionNode:
-    case schema
-    of OptionSchema:
-      if node.optVal.len > 1:
-        trimNodes(node.optVal, 1)
-      if node.optVal.len > 0:
-        fixNode(node.optVal[0], schema.elem, config, depth + 1)
-    else:
-      node = defaultNode(schema)
-  of BoolNode:
-    case schema
-    of BoolSchema:
-      discard
-    else:
-      node = defaultNode(schema)
-  of IntNode:
-    case schema
-    of IntSchema:
-      discard
-    else:
-      node = defaultNode(schema)
-  of FloatNode:
-    case schema
-    of FloatSchema:
-      discard
-    else:
-      node = defaultNode(schema)
-  of EnumNode:
-    case schema
-    of EnumSchema:
-      if node.enumVal < 0:
-        node.enumVal = 0
-      elif schema.enumNames.len > 0 and node.enumVal.int > schema.enumNames.high:
-        node.enumVal = int64(schema.enumNames.high)
-    else:
-      node = defaultNode(schema)
+      if value.optVal != nil:
+        fixNode(value.optVal[], schema.elem, config, depth + 1)
+  of nkEnum:
+    if schema.kind != skEnum:
+      value = defaultNode(schema)
+    elif value.enumVal < 0:
+      value = EnumNode(enumVal: 0)
+    elif schema.enumNames.len > 0 and value.enumVal.int > schema.enumNames.high:
+      value = EnumNode(enumVal: int64(schema.enumNames.high))
+  of nkBool:
+    if schema.kind != skBool:
+      value = defaultNode(schema)
+  of nkInt:
+    if schema.kind != skInt:
+      value = defaultNode(schema)
+  of nkFloat:
+    if schema.kind != skFloat:
+      value = defaultNode(schema)
+  shrinkToBudget(value, schema, config)
 
-  shrinkToBudget(node, schema, config)
-
-proc tryApplyDonor(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
-    choice: MutationCandidate; sources: openArray[FuzzNode]; r: var Rand): bool =
+proc tryApplyDonor(value: var Value; schema: SchemaNode; config: FuzzConfig;
+    choice: MutationCandidate; sources: openArray[Value]; r: var Rand): bool =
   let targetSchema = donorSchemaFor(schema, choice)
-  var donors: seq[FuzzNode] = @[]
-  for source in sources:
-    collectCompatibleSources(targetSchema, source, schema, donors)
+  var donors: seq[Value] = @[]
+  for sourceValue in sources:
+    collectCompatibleSources(targetSchema, sourceValue, schema, donors)
   if donors.len == 0:
     return false
   let donor = donors[r.randInt(donors.high)]
-  assignAtPath(node, choice.path, donor, config, choice.op == mkClone, r)
+  assignAtPath(value, choice.path, donor, config, choice.op == mkClone, r)
   result = true
 
-proc mutateNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
-    sources: openArray[FuzzNode]; seed: uint32) =
-  ## Applies one structure-aware mutation to `node`.
+proc mutateNode(value: var Value; schema: SchemaNode; config: FuzzConfig;
+    sources: openArray[Value]; seed: uint32) =
   var r = initRand(seed)
   var candidates: seq[MutationCandidate] = @[]
-  collectCandidates(node, schema, @[], config, candidates)
+  collectCandidates(value, schema, @[], config, candidates)
   while candidates.len > 0:
     let index = pickWeightedIndex(candidates, r)
     let choice = candidates[index]
     case choice.op
     of mkAdd:
-      addAtPath(node, schema, choice.path, config, r)
+      addAtPath(value, schema, choice.path, config, r)
       break
     of mkMutate:
-      mutateAtPath(node, schema, choice.path, config, r)
+      mutateAtPath(value, schema, choice.path, config, r)
       break
     of mkDelete:
-      deleteAtPath(node, choice.path, r)
+      deleteAtPath(value, choice.path, r)
       break
     of mkCopy, mkClone:
-      if tryApplyDonor(node, schema, config, choice, sources, r):
+      if tryApplyDonor(value, schema, config, choice, sources, r):
         break
       removeCandidateAt(candidates, index)
     of mkNone:
       removeCandidateAt(candidates, index)
-  fixNode(node, schema, config)
+  fixNode(value, schema, config)
 
-proc crossOverNode(node: var FuzzNode; schema: SchemaNode; config: FuzzConfig;
-    donors: openArray[FuzzNode]; seed: uint32) =
-  ## Applies one copy/clone-only crossover step to `node`.
+proc crossOverNode(value: var Value; schema: SchemaNode; config: FuzzConfig;
+    donors: openArray[Value]; seed: uint32) =
   var r = initRand(seed)
   var candidates: seq[MutationCandidate] = @[]
-  collectCrossOverCandidates(node, schema, @[], config, candidates)
+  collectCrossOverCandidates(value, schema, @[], config, candidates)
   while candidates.len > 0:
     let index = pickWeightedIndex(candidates, r)
     let choice = candidates[index]
-    if tryApplyDonor(node, schema, config, choice, donors, r):
+    if tryApplyDonor(value, schema, config, choice, donors, r):
       break
     removeCandidateAt(candidates, index)
-  fixNode(node, schema, config)
+  fixNode(value, schema, config)
 
-proc mutateValue*[T](value: var T; config: FuzzConfig; sources: openArray[T];
-    seed: uint32) {.untyped.} =
-  ## Converts `value` to a node tree, mutates it, and decodes it back.
-  var node = nodeFromValue(value)
-  let typeSchema = schemaFor(T)
-  var sourceNodes: seq[FuzzNode] = @[]
+proc mutateValue*(value: var Value; schema: SchemaNode; config: FuzzConfig;
+    sources: openArray[Value]; seed: uint32) =
+  ## Applies one structure-aware mutation to `value`.
+  var sourceNodes: seq[Value] = @[]
   for item in sources:
-    sourceNodes.add nodeFromValue(item)
-  mutateNode(node, typeSchema, config, sourceNodes, seed)
-  valueFromNode(node, value)
+    sourceNodes.add copyValue(item)
+  mutateNode(value, schema, config, sourceNodes, seed)
 
-proc crossOverValue*[T](value: var T; config: FuzzConfig; donors: openArray[T];
-    seed: uint32) {.untyped.} =
-  ## Converts `value` to a node tree, performs copy/clone-only crossover, and decodes it back.
-  var node = nodeFromValue(value)
-  let typeSchema = schemaFor(T)
-  var donorNodes: seq[FuzzNode] = @[]
+proc crossOverValue*(value: var Value; schema: SchemaNode; config: FuzzConfig;
+    donors: openArray[Value]; seed: uint32) =
+  ## Applies one copy/clone-only crossover step to `value`.
+  var donorNodes: seq[Value] = @[]
   for item in donors:
-    donorNodes.add nodeFromValue(item)
-  crossOverNode(node, typeSchema, config, donorNodes, seed)
-  valueFromNode(node, value)
+    donorNodes.add copyValue(item)
+  crossOverNode(value, schema, config, donorNodes, seed)
